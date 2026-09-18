@@ -1,7 +1,0 @@
-{
-  "builder": "Nixpacks",
-  "nixpacks": {
-    "pythonVersion": "3.12"
-  }
-}
-
