@@ -4,6 +4,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 import uvicorn
 import threading
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -81,16 +82,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("❌ Error generating payment link. Please try again later.")
 
-def main():
-    server_thread = threading.Thread(target=run_web_server, daemon=True)
-    server_thread.start()
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    logging.info("AI Grid Indonesia Telegram Bot is up and running...")
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
+@app.on_event("startup")
+async def startup_event():
+    def run_bot():
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        logging.info("Starting Telegram bot polling...")
+        application.run_polling()
+        
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
