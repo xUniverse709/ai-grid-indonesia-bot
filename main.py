@@ -88,11 +88,12 @@ async def startup_event():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # Disable stop_signals so it doesn't crash inside a background thread
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).stop_signals(False).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button_handler))
         logging.info("Starting Telegram bot polling...")
-        application.run_polling()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
