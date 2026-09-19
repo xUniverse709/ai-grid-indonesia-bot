@@ -85,6 +85,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @app.on_event("startup")
 async def startup_event():
     def run_bot():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button_handler))
