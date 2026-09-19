@@ -3,7 +3,7 @@ import logging
 import httpx
 from fastapi import FastAPI, Request, Response
 import uvicorn
-import threading
+from contextlib import asynccontextmanager
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,7 +15,26 @@ NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1"
 
-app = FastAPI()
+# Initialize Telegram application globally
+telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize and start the Telegram bot within FastAPI's loop
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logging.info("Telegram bot polling started successfully via FastAPI lifespan!")
+    
+    yield
+    
+    # Shutdown: Stop the Telegram bot cleanly
+    await telegram_app.updater.stop()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+    logging.info("Telegram bot stopped.")
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook/nowpayments")
 async def nowpayments_webhook(request: Request):
@@ -31,9 +50,6 @@ async def nowpayments_webhook(request: Request):
             logging.error(f"Error processing webhook user ID: {e}")
             
     return Response(status_code=200)
-
-def run_web_server():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("💳 Join AI Grid Indonesia ($100 USDT)", callback_data="buy_program")]]
@@ -82,18 +98,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("❌ Error generating payment link. Please try again later.")
 
-@app.on_event("startup")
-async def startup_event():
-    def run_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Disable stop_signals so it doesn't crash inside a background thread
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).stop_signals(False).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        logging.info("Starting Telegram bot polling...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+# Register handlers
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
