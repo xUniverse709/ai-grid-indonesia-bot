@@ -276,7 +276,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 keyboard = [
                     [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
-                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/ElonMofficialx")]
+                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
                 ]
                 await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
