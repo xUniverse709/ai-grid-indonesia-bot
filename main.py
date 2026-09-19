@@ -92,5 +92,5 @@ def main():
     logging.info("AI Grid Indonesia Telegram Bot is up and running...")
     application.run_polling()
 
-if name == "__main__":
+if __name__ == "__main__":
     main()
