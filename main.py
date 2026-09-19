@@ -67,7 +67,6 @@ async def nowpayments_webhook(request: Request):
         try:
             telegram_user_id = int(order_id.split("_")[-1])
             logging.info(f"Payment confirmed successfully for user {telegram_user_id}!")
-            # Send confirmation message to user
             await telegram_app.bot.send_message(
                 chat_id=telegram_user_id,
                 text="🎉 **Capital Allocation Confirmed!**\n\nYour transaction has been verified on the blockchain. Our investor relations desk will follow up shortly with your official participation agreement.",
@@ -85,10 +84,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "───────────────────────────────\n"
         "Welcome to the official capital allocation portal for Batam's **$1B, 50MW High-Density AI Data Center**.\n\n"
         "📊 **Key Financial Highlights:**\n"
-        "• **Preferred Dividend:** 10.0% Annualized (Distributed every 90 days)\n"
+        "• **Preferred Dividend:** 20.0% Cash Yield (Distributed every 30 days)\n"
+        "• **Liquidity Term:** Flexible 30-Day Cycle (Exit principal or roll over)\n"
         "• **Target Net IRR:** 42.5%\n"
         "• **Projected MOIC:** 3.8x\n"
-        "• **Infrastructure:** Direct-to-chip liquid cooling for NVIDIA Blackwell B200 clusters\n\n"
+        "• **Infrastructure:** Direct-to-chip liquid cooling for NVIDIA Blackwell clusters\n\n"
         "Select an option below to explore or allocate capital:"
     )
     
@@ -114,17 +114,17 @@ async def show_tiers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tiers_text = (
         "💼 **AI Grid Capital Syndication Matrix**\n\n"
         "🔹 **Tier 1 — Edge Node ($1,000 USD)**\n"
-        "• 10% Preferred Dividend (90-day payouts)\n"
-        "• Standard Syndicate Yield Rights\n\n"
+        "• 20% Preferred Dividend (Monthly $200 payout)\n"
+        "• Standard 30-Day Liquidity Cycle\n\n"
         "🔹 **Tier 2 — Rack Suite ($5,000 USD)**\n"
-        "• 10% Preferred Dividend (90-day payouts)\n"
+        "• 20% Preferred Dividend (Monthly $1,000 payout)\n"
         "• Priority Compute Allocation Discount (15% off cloud rates)\n\n"
         "🔹 **Tier 3 — GPU Cluster ($10,000 USD)**\n"
-        "• 10% Preferred Dividend + Pro-Rata Equity Upside\n"
-        "• Quarterly Executive Briefing Access\n\n"
+        "• 20% Preferred Dividend (Monthly $2,000 payout) + Equity Upside\n"
+        "• Monthly Executive Briefing Access\n\n"
         "🔹 **Tier 4 — Institutional Vault ($50,000+ USD)**\n"
-        "• Custom Liquidity Terms & Direct On-Site Batam SEZ Inspection\n"
-        "• Dedicated Advisory Seat & Max Distribution Weight"
+        "• 20% Preferred Dividend (Monthly $10,000+ payout)\n"
+        "• Custom Liquidity Terms & Direct On-Site Batam SEZ Inspection"
     )
     
     keyboard = [
@@ -138,12 +138,12 @@ async def show_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     calc_text = (
-        "𝄠 **Yield Projections Summary (10% Preferred Dividend)**\n\n"
-        "• **$1,000 Allocation:** ~$25.00 / quarter ($100 / year)\n"
-        "• **$5,000 Allocation:** ~$125.00 / quarter ($500 / year)\n"
-        "• **$10,000 Allocation:** ~$250.00 / quarter ($1,000 / year)\n"
-        "• **$50,000 Allocation:** ~$1,250.00 / quarter ($5,000 / year)\n\n"
-        "💡 *Dividends are backed by long-term enterprise GPU cloud contracts.*"
+        "𝄠 **Yield Projections Summary (20.0% Paid Every 30 Days)**\n\n"
+        "• **$1,000 Allocation:** **$200.00** / 30 days ($2,400 / year)\n"
+        "• **$5,000 Allocation:** **$1,000.00** / 30 days ($12,000 / year)\n"
+        "• **$10,000 Allocation:** **$2,000.00** / 30 days ($24,000 / year)\n"
+        "• **$50,000 Allocation:** **$10,000.00** / 30 days ($120,000 / year)\n\n"
+        "💡 *Investors receive cash payouts every 30 days. At the end of each cycle, you can withdraw your principal or roll it over into the next 30-day tranche.*"
     )
     
     keyboard = [
@@ -171,7 +171,6 @@ async def select_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # Store chosen preset amount
     amount_str = query.data.split("_")[1]
     context.user_data["invest_amount"] = float(amount_str)
     
@@ -277,7 +276,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 keyboard = [
                     [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
-                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
+                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/elonMofficialx")]
                 ]
                 await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
@@ -291,7 +290,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Exception generating invoice: {e}")
         await query.edit_message_text("❌ Connection error. Please try again later.")
 
-# Set up Telegram Handlers
+# Handlers
 custom_amount_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(prompt_custom_amount, pattern="^amount_custom$")],
     states={
