@@ -4,31 +4,52 @@ import httpx
 from fastapi import FastAPI, Request, Response
 import uvicorn
 from contextlib import asynccontextmanager
-import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
+)
 
+# Setup logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1"
 
+# Conversation State
+WAITING_CUSTOM_AMOUNT = 1
+
+# Crypto ticker mapping for NOWPayments API
+CRYPTO_MAP = {
+    "usdttrc20": {"label": "USDT (TRC-20)", "ticker": "usdttrc20"},
+    "usdterc20": {"label": "USDT (ERC-20)", "ticker": "usdterc20"},
+    "usdcerc20": {"label": "USDC (ERC-20)", "ticker": "usdcerc20"},
+    "usdcsol": {"label": "USDC (Solana)", "ticker": "usdcsol"},
+    "btc": {"label": "Bitcoin (BTC)", "ticker": "btc"},
+    "eth": {"label": "Ethereum (ETH)", "ticker": "eth"},
+    "sol": {"label": "Solana (SOL)", "ticker": "sol"},
+    "bnb": {"label": "BNB (BEP-20)", "ticker": "bnbmainnet"}
+}
+
 # Initialize Telegram application globally
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize and start the Telegram bot within FastAPI's loop
+    # Startup
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logging.info("Telegram bot polling started successfully via FastAPI lifespan!")
-    
     yield
-    
-    # Shutdown: Stop the Telegram bot cleanly
+    # Shutdown
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
@@ -42,43 +63,198 @@ async def nowpayments_webhook(request: Request):
     payment_status = data.get("payment_status")
     order_id = data.get("order_id")
     
-    if payment_status == "finished" and order_id:
+    if payment_status in ["finished", "confirmed"] and order_id:
         try:
             telegram_user_id = int(order_id.split("_")[-1])
             logging.info(f"Payment confirmed successfully for user {telegram_user_id}!")
+            # Send confirmation message to user
+            await telegram_app.bot.send_message(
+                chat_id=telegram_user_id,
+                text="🎉 **Capital Allocation Confirmed!**\n\nYour transaction has been verified on the blockchain. Our investor relations desk will follow up shortly with your official participation agreement.",
+                parse_mode="Markdown"
+            )
         except Exception as e:
             logging.error(f"Error processing webhook user ID: {e}")
             
     return Response(status_code=200)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("💳 Join AI Grid Indonesia ($100 USDT)", callback_data="buy_program")]]
+    """Executive Dynamic Onboarding Flow"""
+    welcome_text = (
+        "🚀 **AI GRID INDONESIA | Sovereign Compute Syndicate**\n"
+        "───────────────────────────────\n"
+        "Welcome to the official capital allocation portal for Batam's **$1B, 50MW High-Density AI Data Center**.\n\n"
+        "📊 **Key Financial Highlights:**\n"
+        "• **Preferred Dividend:** 10.0% Annualized (Distributed every 90 days)\n"
+        "• **Target Net IRR:** 42.5%\n"
+        "• **Projected MOIC:** 3.8x\n"
+        "• **Infrastructure:** Direct-to-chip liquid cooling for NVIDIA Blackwell B200 clusters\n\n"
+        "Select an option below to explore or allocate capital:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📈 View Investment Tiers", callback_data="show_tiers")],
+        [InlineKeyboardButton("𝄠 Interactive ROI Calculator", callback_data="show_calculator")],
+        [InlineKeyboardButton("💳 Allocate Capital Now", callback_data="allocate_menu")],
+        [InlineKeyboardButton("📩 Official Support", url="https://t.me/contactaigrid")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        "Welcome to AI Grid Indonesia.\n\n"
-        "Click the button below to purchase program access securely via crypto.",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        
+    return ConversationHandler.END
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_tiers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == "buy_program":
-        user_id = query.from_user.id
-        await query.edit_message_text("🔄 Generating your secure crypto invoice...")
+    tiers_text = (
+        "💼 **AI Grid Capital Syndication Matrix**\n\n"
+        "🔹 **Tier 1 — Edge Node ($1,000 USD)**\n"
+        "• 10% Preferred Dividend (90-day payouts)\n"
+        "• Standard Syndicate Yield Rights\n\n"
+        "🔹 **Tier 2 — Rack Suite ($5,000 USD)**\n"
+        "• 10% Preferred Dividend (90-day payouts)\n"
+        "• Priority Compute Allocation Discount (15% off cloud rates)\n\n"
+        "🔹 **Tier 3 — GPU Cluster ($10,000 USD)**\n"
+        "• 10% Preferred Dividend + Pro-Rata Equity Upside\n"
+        "• Quarterly Executive Briefing Access\n\n"
+        "🔹 **Tier 4 — Institutional Vault ($50,000+ USD)**\n"
+        "• Custom Liquidity Terms & Direct On-Site Batam SEZ Inspection\n"
+        "• Dedicated Advisory Seat & Max Distribution Weight"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💳 Proceed to Allocation", callback_data="allocate_menu")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
+    ]
+    await query.edit_message_text(tiers_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def show_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    calc_text = (
+        "𝄠 **Yield Projections Summary (10% Preferred Dividend)**\n\n"
+        "• **$1,000 Allocation:** ~$25.00 / quarter ($100 / year)\n"
+        "• **$5,000 Allocation:** ~$125.00 / quarter ($500 / year)\n"
+        "• **$10,000 Allocation:** ~$250.00 / quarter ($1,000 / year)\n"
+        "• **$50,000 Allocation:** ~$1,250.00 / quarter ($5,000 / year)\n\n"
+        "💡 *Dividends are backed by long-term enterprise GPU cloud contracts.*"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💳 Allocate Capital Now", callback_data="allocate_menu")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
+    ]
+    await query.edit_message_text(calc_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def allocate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    menu_text = "💳 **Select your investment amount or enter a custom sum:**"
+    keyboard = [
+        [InlineKeyboardButton("$1,000 USD (Node)", callback_data="amount_1000")],
+        [InlineKeyboardButton("$5,000 USD (Rack)", callback_data="amount_5000")],
+        [InlineKeyboardButton("$10,000 USD (Cluster)", callback_data="amount_10000")],
+        [InlineKeyboardButton("$50,000 USD (Institutional)", callback_data="amount_50000")],
+        [InlineKeyboardButton("✍️ Custom Investment Amount", callback_data="amount_custom")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
+    ]
+    await query.edit_message_text(menu_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def select_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Store chosen preset amount
+    amount_str = query.data.split("_")[1]
+    context.user_data["invest_amount"] = float(amount_str)
+    
+    await show_crypto_selection(query, context)
+
+async def prompt_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "✍️ **Custom Investment Amount**\n\n"
+        "Please reply with the exact dollar amount (USD) you wish to invest (e.g. `2500` or `75000`).\n\n"
+        "*(Minimum investment: $100 USD)*",
+        parse_mode="Markdown"
+    )
+    return WAITING_CUSTOM_AMOUNT
+
+async def receive_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace("$", "").replace(",", "")
+    try:
+        val = float(text)
+        if val < 100:
+            await update.message.reply_text("❌ Minimum investment amount is $100 USD. Please enter a higher value:")
+            return WAITING_CUSTOM_AMOUNT
         
-        headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
-        payload = {
-            "price_amount": 100.0,
-            "price_currency": "usd",
-            "pay_currency": "usdttrc20",
-            "order_id": f"ai_grid_{user_id}",
-            "order_description": "AI Grid Indonesia Access"
-        }
+        context.user_data["invest_amount"] = val
         
+        keyboard = [
+            [InlineKeyboardButton("USDT (TRC-20)", callback_data="pay_usdttrc20"), InlineKeyboardButton("USDT (ERC-20)", callback_data="pay_usdterc20")],
+            [InlineKeyboardButton("USDC (ERC-20)", callback_data="pay_usdcerc20"), InlineKeyboardButton("USDC (Solana)", callback_data="pay_usdcsol")],
+            [InlineKeyboardButton("Bitcoin (BTC)", callback_data="pay_btc"), InlineKeyboardButton("Ethereum (ETH)", callback_data="pay_eth")],
+            [InlineKeyboardButton("Solana (SOL)", callback_data="pay_sol"), InlineKeyboardButton("BNB (BEP-20)", callback_data="pay_bnb")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]
+        ]
+        await update.message.reply_text(
+            f"✅ **Amount Set:** ${val:,.2f} USD\n\nSelect your preferred cryptocurrency payment method:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid number format. Please enter a valid numerical value (e.g., 2500):")
+        return WAITING_CUSTOM_AMOUNT
+
+async def show_crypto_selection(query, context: ContextTypes.DEFAULT_TYPE):
+    amount = context.user_data.get("invest_amount", 1000)
+    
+    keyboard = [
+        [InlineKeyboardButton("USDT (TRC-20)", callback_data="pay_usdttrc20"), InlineKeyboardButton("USDT (ERC-20)", callback_data="pay_usdterc20")],
+        [InlineKeyboardButton("USDC (ERC-20)", callback_data="pay_usdcerc20"), InlineKeyboardButton("USDC (Solana)", callback_data="pay_usdcsol")],
+        [InlineKeyboardButton("Bitcoin (BTC)", callback_data="pay_btc"), InlineKeyboardButton("Ethereum (ETH)", callback_data="pay_eth")],
+        [InlineKeyboardButton("Solana (SOL)", callback_data="pay_sol"), InlineKeyboardButton("BNB (BEP-20)", callback_data="pay_bnb")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="allocate_menu")]
+    ]
+    await query.edit_message_text(
+        f"💵 **Selected Allocation:** ${amount:,.2f} USD\n\n"
+        f"Select your preferred cryptocurrency for payment:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pay_key = query.data.replace("pay_", "")
+    crypto_info = CRYPTO_MAP.get(pay_key, {"label": pay_key.upper(), "ticker": pay_key})
+    
+    user_id = query.from_user.id
+    amount = context.user_data.get("invest_amount", 1000.0)
+    
+    await query.edit_message_text("🔄 **Connecting to blockchain gateway & generating payment invoice...**", parse_mode="Markdown")
+    
+    headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "price_amount": float(amount),
+        "price_currency": "usd",
+        "pay_currency": crypto_info["ticker"],
+        "order_id": f"aigrid_{amount:.0f}_{user_id}",
+        "order_description": f"AI Grid Indonesia Allocation (${amount:,.2f} USD)"
+    }
+    
+    try:
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{NOWPAYMENTS_API_URL}/payment", json=payload, headers=headers)
             data = response.json()
@@ -89,15 +265,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pay_currency = data["pay_currency"].upper()
                 
                 invoice_text = (
-                    f"✅ **Invoice Generated Successfully**\n\n"
-                    f"Please send exactly {pay_amount} {pay_currency} to the address below:\n\n"
+                    f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
+                    f"───────────────────────────────\n"
+                    f"• **USD Value:** ${amount:,.2f} USD\n"
+                    f"• **Asset:** {crypto_info['label']}\n"
+                    f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
+                    f"📍 **Deposit Address:**\n"
                     f"`{pay_address}`\n\n"
-                    f"*Note: Your account will unlock automatically once the blockchain transaction confirms.*"
+                    f"⚠️ *Important:* Send the exact amount above. Your participation will be recorded automatically as soon as the transaction is confirmed on the network."
                 )
-                await query.edit_message_text(invoice_text, parse_mode="Markdown")
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
+                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
+                ]
+                await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
-                await query.edit_message_text("❌ Error generating payment link. Please try again later.")
+                logging.error(f"NOWPayments Error: {data}")
+                await query.edit_message_text(
+                    "❌ **Gateway Timeout:** Error creating crypto invoice. Please try again or contact support.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Try Again", callback_data="allocate_menu")]]),
+                    parse_mode="Markdown"
+                )
+    except Exception as e:
+        logging.error(f"Exception generating invoice: {e}")
+        await query.edit_message_text("❌ Connection error. Please try again later.")
 
-# Register handlers
+# Set up Telegram Handlers
+custom_amount_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(prompt_custom_amount, pattern="^amount_custom$")],
+    states={
+        WAITING_CUSTOM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_amount)]
+    },
+    fallbacks=[CommandHandler("start", start)]
+)
+
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CallbackQueryHandler(button_handler))
+telegram_app.add_handler(custom_amount_handler)
+telegram_app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
+telegram_app.add_handler(CallbackQueryHandler(show_tiers, pattern="^show_tiers$"))
+telegram_app.add_handler(CallbackQueryHandler(show_calculator, pattern="^show_calculator$"))
+telegram_app.add_handler(CallbackQueryHandler(allocate_menu, pattern="^allocate_menu$"))
+telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|10000|50000)$"))
+telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
