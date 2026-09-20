@@ -94,7 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("📈 View Investment Tiers", callback_data="show_tiers")],
-        [InlineKeyboardButton("𝄠 Interactive ROI Calculator", callback_data="show_calculator")],
+        [InlineKeyboardButton("🧮 Interactive ROI Calculator", callback_data="show_calculator")],
         [InlineKeyboardButton("💳 Allocate Capital Now", callback_data="allocate_menu")],
         [InlineKeyboardButton("📩 Official Support", url="https://t.me/contactaigrid")]
     ]
@@ -138,7 +138,7 @@ async def show_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     calc_text = (
-        "𝄠 **Yield Projections Summary (20.0% Paid Every 30 Days)**\n\n"
+        "🧮 **Yield Projections Summary (20.0% Paid Every 30 Days)**\n\n"
         "• **$1,000 Allocation:** **$200.00** / 30 days ($2,400 / year)\n"
         "• **$5,000 Allocation:** **$1,000.00** / 30 days ($12,000 / year)\n"
         "• **$10,000 Allocation:** **$2,000.00** / 30 days ($24,000 / year)\n"
@@ -263,7 +263,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pay_amount = data["pay_amount"]
                 pay_currency = data["pay_currency"].upper()
                 
-                # Save into session data for toggling views/QR codes
+                # Save session data for toggling QR code view
                 context.user_data["pay_address"] = pay_address
                 context.user_data["pay_amount"] = pay_amount
                 context.user_data["pay_currency"] = pay_currency
@@ -302,19 +302,31 @@ async def show_qr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     pay_address = context.user_data.get("pay_address", "N/A")
+    qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={pay_address}"
     
-    qr_explanation_text = (
-        f"📱 **Why Use a QR Code?**\n"
+    qr_caption = (
+        f"📱 **SCAN TO PAY**\n"
         f"───────────────────────────────\n"
-        f"Scanning a QR code directly from your crypto wallet app completely eliminates manual typing mistakes and ensures funds route to the correct destination safely.\n\n"
-        f"You can scan your wallet camera directly against an invoice QR code or use a QR tool for this address:\n"
+        f"Scanning this QR code directly from your crypto wallet app eliminates manual typing mistakes and ensures funds route safely.\n\n"
+        f"📍 **Deposit Address:**\n"
         f"`{pay_address}`"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back to Wallet Address", callback_data="back_to_invoice")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(qr_explanation_text, parse_mode="Markdown", reply_markup=reply_markup)
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+        
+    await context.bot.send_photo(
+        chat_id=query.from_user.id,
+        photo=qr_code_url,
+        caption=qr_caption,
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -344,7 +356,17 @@ async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(invoice_text, parse_mode="Markdown", reply_markup=reply_markup)
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+        
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=invoice_text,
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 # Handlers
 custom_amount_handler = ConversationHandler(
@@ -365,3 +387,6 @@ telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^a
 telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
 telegram_app.add_handler(CallbackQueryHandler(show_qr_handler, pattern="^show_qr$"))
 telegram_app.add_handler(CallbackQueryHandler(back_to_invoice_handler, pattern="^back_to_invoice$"))
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
