@@ -263,6 +263,12 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pay_amount = data["pay_amount"]
                 pay_currency = data["pay_currency"].upper()
                 
+                # Save into session data for toggling views/QR codes
+                context.user_data["pay_address"] = pay_address
+                context.user_data["pay_amount"] = pay_amount
+                context.user_data["pay_currency"] = pay_currency
+                context.user_data["crypto_label"] = crypto_info["label"]
+                
                 invoice_text = (
                     f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
                     f"───────────────────────────────\n"
@@ -275,6 +281,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 
                 keyboard = [
+                    [InlineKeyboardButton("📱 Do you need a QR code?", callback_data="show_qr")],
                     [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
                     [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
                 ]
@@ -289,6 +296,55 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Exception generating invoice: {e}")
         await query.edit_message_text("❌ Connection error. Please try again later.")
+
+async def show_qr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pay_address = context.user_data.get("pay_address", "N/A")
+    
+    qr_explanation_text = (
+        f"📱 **Why Use a QR Code?**\n"
+        f"───────────────────────────────\n"
+        f"Scanning a QR code directly from your crypto wallet app completely eliminates manual typing mistakes and ensures funds route to the correct destination safely.\n\n"
+        f"You can scan your wallet camera directly against an invoice QR code or use a QR tool for this address:\n"
+        f"`{pay_address}`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back to Wallet Address", callback_data="back_to_invoice")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(qr_explanation_text, parse_mode="Markdown", reply_markup=reply_markup)
+
+async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pay_address = context.user_data.get("pay_address", "N/A")
+    pay_amount = context.user_data.get("pay_amount", "N/A")
+    pay_currency = context.user_data.get("pay_currency", "BTC")
+    crypto_label = context.user_data.get("crypto_label", "Crypto")
+    amount = context.user_data.get("invest_amount", 1000.0)
+    
+    invoice_text = (
+        f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
+        f"───────────────────────────────\n"
+        f"• **USD Value:** ${amount:,.2f} USD\n"
+        f"• **Asset:** {crypto_label}\n"
+        f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
+        f"📍 **Deposit Address:**\n"
+        f"`{pay_address}`\n\n"
+        f"⚠️ *Important:* Send the exact amount above. Your participation will be recorded automatically as soon as the transaction is confirmed on the network."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📱 Do you need a QR code?", callback_data="show_qr")],
+        [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
+        [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(invoice_text, parse_mode="Markdown", reply_markup=reply_markup)
 
 # Handlers
 custom_amount_handler = ConversationHandler(
@@ -307,3 +363,5 @@ telegram_app.add_handler(CallbackQueryHandler(show_calculator, pattern="^show_ca
 telegram_app.add_handler(CallbackQueryHandler(allocate_menu, pattern="^allocate_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|10000|50000)$"))
 telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
+telegram_app.add_handler(CallbackQueryHandler(show_qr_handler, pattern="^show_qr$"))
+telegram_app.add_handler(CallbackQueryHandler(back_to_invoice_handler, pattern="^back_to_invoice$"))
