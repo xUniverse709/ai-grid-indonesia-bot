@@ -1,6 +1,8 @@
 import os
 import logging
+import time
 import httpx
+from collections import defaultdict
 from fastapi import FastAPI, Request, Response
 import uvicorn
 from contextlib import asynccontextmanager
@@ -25,6 +27,25 @@ NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1"
 
 # Conversation State
 WAITING_CUSTOM_AMOUNT = 1
+
+# ============================================================
+# [ADDED — ANTI-BOT CONFIG]
+# Rate limits, caps, and sanity thresholds to protect NOWPayments
+# ============================================================
+INVOICE_COOLDOWN_SECONDS = 90          # 1 invoice per user per 90 seconds
+DAILY_INVOICE_CAP = 10                  # max 10 invoices per user per day
+MAX_AMOUNT_USD = 10_000_000             # hard cap on single allocation
+MIN_AMOUNT_USD = 1_000                  # raised from $100 to $1,000
+SUSPICIOUS_REPEAT_WINDOW = 300          # 5 minutes — same amount = flag
+
+# In-memory rate tracker — survives across conversations
+# Structure: { user_id: { "last_invoice_ts": float, "daily_count": int, "daily_reset_ts": float, "recent_amounts": [(ts, amount), ...] } }
+RATE_TRACKER = defaultdict(lambda: {
+    "last_invoice_ts": 0.0,
+    "daily_count": 0,
+    "daily_reset_ts": time.time(),
+    "recent_amounts": []
+})
 
 # Crypto ticker mapping for NOWPayments API
 CRYPTO_MAP = {
@@ -77,18 +98,66 @@ async def nowpayments_webhook(request: Request):
             
     return Response(status_code=200)
 
+# ============================================================
+# [ADDED — ANTI-BOT HELPERS]
+# All rate-limit logic lives here
+# ============================================================
+def check_user_rate_limit(user_id: int, amount: float) -> tuple[bool, str]:
+    """
+    Returns (allowed, reason).
+    If allowed=False, reason contains the message to show the user.
+    """
+    now = time.time()
+    tracker = RATE_TRACKER[user_id]
+    
+    # Reset daily counter if 24h passed
+    if now - tracker["daily_reset_ts"] > 86400:
+        tracker["daily_count"] = 0
+        tracker["daily_reset_ts"] = now
+    
+    # Layer 1 — cooldown between invoices
+    if now - tracker["last_invoice_ts"] < INVOICE_COOLDOWN_SECONDS:
+        wait = int(INVOICE_COOLDOWN_SECONDS - (now - tracker["last_invoice_ts"]))
+        return False, f"⏱️ Please wait **{wait} seconds** between allocation attempts. This protects the payment gateway."
+    
+    # Layer 2 — daily cap
+    if tracker["daily_count"] >= DAILY_INVOICE_CAP:
+        return False, "📊 Daily allocation limit reached. Please try again tomorrow or contact support at **contact@aigrid.id**."
+    
+    # Layer 3 — same amount repeated too often in short window
+    recent = [a for (ts, a) in tracker["recent_amounts"] if now - ts < SUSPICIOUS_REPEAT_WINDOW]
+    if len(recent) >= 3 and all(abs(a - amount) < 0.01 for a in recent[-3:]):
+        return False, "🔒 Repeated identical allocations flagged for review. Please contact **contact@aigrid.id** to proceed."
+    
+    # Layer 4 — amount sanity checks
+    if amount > MAX_AMOUNT_USD:
+        return False, f"⚠️ Amount exceeds the automated allocation limit. For allocations above ${MAX_AMOUNT_USD:,.0f}, please contact **contact@aigrid.id** directly."
+    
+    return True, ""
+
+def record_invoice_attempt(user_id: int, amount: float):
+    """Record a successful invoice creation for rate limiting."""
+    now = time.time()
+    tracker = RATE_TRACKER[user_id]
+    tracker["last_invoice_ts"] = now
+    tracker["daily_count"] += 1
+    tracker["recent_amounts"].append((now, amount))
+    # Keep only last 10 entries
+    tracker["recent_amounts"] = tracker["recent_amounts"][-10:]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Executive Dynamic Onboarding Flow"""
     welcome_text = (
-        "🚀 **AI GRID INDONESIA | Sovereign Compute Syndicate**\n"
+        "⚡ **AI GRID INDONESIA | Sovereign Compute Syndicate**\n"
         "───────────────────────────────\n"
-        "Welcome to the official capital allocation portal for Batam's **$1B, 50MW High-Density AI Data Center**.\n\n"
+        "Welcome to the official capital allocation portal for Batam's **50MW Tier-IV AI Compute Hub**.\n\n"
+        "📍 **Batam SEZ, Indonesia** — 20km from Singapore, sub-2.5ms subsea latency.\n\n"
         "📊 **Key Financial Highlights:**\n"
         "• **Preferred Dividend:** 20.0% Cash Yield (Distributed every 30 days)\n"
-        "• **Liquidity Term:** Flexible 30-Day Cycle (Exit principal or roll over)\n"
         "• **Target Net IRR:** 42.5%\n"
-        "• **Projected MOIC:** 3.8x\n"
-        "• **Infrastructure:** Direct-to-chip liquid cooling for NVIDIA Blackwell clusters\n\n"
+        "• **Target MOIC:** 3.8x over 3 years\n"
+        "• **Tiers from $1,000**\n"
+        "• **Infrastructure:** Direct-to-chip liquid cooling, NVIDIA Blackwell-class\n\n"
         "Select an option below to explore or allocate capital:"
     )
     
@@ -113,18 +182,24 @@ async def show_tiers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     tiers_text = (
         "💼 **AI Grid Capital Syndication Matrix**\n\n"
-        "🔹 **Tier 1 — Edge Node ($1,000 USD)**\n"
-        "• 20% Preferred Dividend (Monthly $200 payout)\n"
-        "• Standard 30-Day Liquidity Cycle\n\n"
-        "🔹 **Tier 2 — Rack Suite ($5,000 USD)**\n"
-        "• 20% Preferred Dividend (Monthly $1,000 payout)\n"
-        "• Priority Compute Allocation Discount (15% off cloud rates)\n\n"
-        "🔹 **Tier 3 — GPU Cluster ($10,000 USD)**\n"
-        "• 20% Preferred Dividend (Monthly $2,000 payout) + Equity Upside\n"
-        "• Monthly Executive Briefing Access\n\n"
-        "🔹 **Tier 4 — Institutional Vault ($50,000+ USD)**\n"
-        "• 20% Preferred Dividend (Monthly $10,000+ payout)\n"
-        "• Custom Liquidity Terms & Direct On-Site Batam SEZ Inspection"
+        "🔹 **Tier 1 — Micro | $1,000 – $4,999**\n"
+        "• 20% Preferred Dividend\n"
+        "• 30-Day Payout Cycle (bank or crypto)\n"
+        "• Telegram Bot Access\n\n"
+        "🔹 **Tier 2 — Syndicate | $5,000 – $24,999**\n"
+        "• 20% Preferred Dividend\n"
+        "• 42.5% Target Net IRR\n"
+        "• Pro-rata Rights Phase 2\n\n"
+        "🔹 **Tier 3 — Institutional | $25,000 – $99,999** ⭐ *Featured*\n"
+        "• Priority Dividend Payout\n"
+        "• 3.8x Target MOIC\n"
+        "• Priority Allocation Phase 2\n\n"
+        "🔹 **Tier 4 — Anchor | $100,000+**\n"
+        "• Structured Equity / Debt\n"
+        "• Dedicated GPU Compute\n"
+        "• VIP Site Inspection\n"
+        "• Direct Founding Team Access\n\n"
+        "All tiers share the same 20.0% preferred return per 30-day cycle."
     )
     
     keyboard = [
@@ -138,12 +213,13 @@ async def show_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     calc_text = (
-        "🧮 **Yield Projections Summary (20.0% Paid Every 30 Days)**\n\n"
+        "🧮 **Yield Projections (20.0% Paid Every 30 Days)**\n\n"
         "• **$1,000 Allocation:** **$200.00** / 30 days ($2,400 / year)\n"
         "• **$5,000 Allocation:** **$1,000.00** / 30 days ($12,000 / year)\n"
-        "• **$10,000 Allocation:** **$2,000.00** / 30 days ($24,000 / year)\n"
-        "• **$50,000 Allocation:** **$10,000.00** / 30 days ($120,000 / year)\n\n"
-        "💡 *Investors receive cash payouts every 30 days. At the end of each cycle, you can withdraw your principal or roll it over into the next 30-day tranche.*"
+        "• **$25,000 Allocation:** **$5,000.00** / 30 days ($60,000 / year)\n"
+        "• **$100,000 Allocation:** **$20,000.00** / 30 days ($240,000 / year)\n\n"
+        "📈 **3-Year Target MOIC:** 3.8x (projected)\n\n"
+        "💡 *All figures are forward-looking targets, not guarantees. Capital is at risk. Payouts route via bank transfer or crypto (USDT/BTC/ETH).*"
     )
     
     keyboard = [
@@ -156,13 +232,13 @@ async def allocate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    menu_text = "💳 **Select your investment amount or enter a custom sum:**"
+    menu_text = "💳 **Select your allocation tier or enter a custom amount:**"
     keyboard = [
-        [InlineKeyboardButton("$1,000 USD (Node)", callback_data="amount_1000")],
-        [InlineKeyboardButton("$5,000 USD (Rack)", callback_data="amount_5000")],
-        [InlineKeyboardButton("$10,000 USD (Cluster)", callback_data="amount_10000")],
-        [InlineKeyboardButton("$50,000 USD (Institutional)", callback_data="amount_50000")],
-        [InlineKeyboardButton("✍️ Custom Investment Amount", callback_data="amount_custom")],
+        [InlineKeyboardButton("$1,000 — Micro Entry", callback_data="amount_1000")],
+        [InlineKeyboardButton("$5,000 — Syndicate Entry", callback_data="amount_5000")],
+        [InlineKeyboardButton("$25,000 — Institutional Entry", callback_data="amount_25000")],
+        [InlineKeyboardButton("$100,000 — Anchor Entry", callback_data="amount_100000")],
+        [InlineKeyboardButton("✍️ Custom Amount ($1,000+)", callback_data="amount_custom")],
         [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
     ]
     await query.edit_message_text(menu_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -181,9 +257,9 @@ async def prompt_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     await query.edit_message_text(
-        "✍️ **Custom Investment Amount**\n\n"
-        "Please reply with the exact dollar amount (USD) you wish to invest (e.g. `2500` or `75000`).\n\n"
-        "*(Minimum investment: $100 USD)*",
+        "✍️ **Custom Allocation Amount**\n\n"
+        "Please reply with the exact USD amount you wish to allocate (e.g. `3500` or `75000`).\n\n"
+        "*(Minimum allocation: $1,000 USD)*",
         parse_mode="Markdown"
     )
     return WAITING_CUSTOM_AMOUNT
@@ -192,8 +268,12 @@ async def receive_custom_amount(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text.strip().replace("$", "").replace(",", "")
     try:
         val = float(text)
-        if val < 100:
-            await update.message.reply_text("❌ Minimum investment amount is $100 USD. Please enter a higher value:")
+        if val < MIN_AMOUNT_USD:
+            await update.message.reply_text(f"❌ Minimum allocation is ${MIN_AMOUNT_USD:,} USD. Please enter a higher value:")
+            return WAITING_CUSTOM_AMOUNT
+        
+        if val > MAX_AMOUNT_USD:
+            await update.message.reply_text(f"⚠️ Amounts above ${MAX_AMOUNT_USD:,} require direct contact. Please email **contact@aigrid.id**.", parse_mode="Markdown")
             return WAITING_CUSTOM_AMOUNT
         
         context.user_data["invest_amount"] = val
@@ -242,6 +322,19 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     amount = context.user_data.get("invest_amount", 1000.0)
     
+    # ============================================================
+    # [ADDED — ANTI-BOT CHECK]
+    # Run rate limits before touching NOWPayments
+    # ============================================================
+    allowed, reason = check_user_rate_limit(user_id, amount)
+    if not allowed:
+        await query.edit_message_text(
+            reason,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Allocation", callback_data="allocate_menu")]])
+        )
+        return
+    
     await query.edit_message_text("🔄 **Connecting to blockchain gateway & generating payment invoice...**", parse_mode="Markdown")
     
     headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
@@ -268,6 +361,12 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["pay_amount"] = pay_amount
                 context.user_data["pay_currency"] = pay_currency
                 context.user_data["crypto_label"] = crypto_info["label"]
+                
+                # ============================================================
+                # [ADDED — ANTI-BOT RECORD]
+                # Record successful invoice for rate tracking
+                # ============================================================
+                record_invoice_attempt(user_id, amount)
                 
                 invoice_text = (
                     f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
@@ -368,6 +467,59 @@ async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=reply_markup
     )
 
+# ============================================================
+# [ADDED — NEW COMMANDS]
+# Founder, Risk, Status
+# ============================================================
+async def cmd_founder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Speaks about the founder — Shivon Zilis"""
+    text = (
+        "👤 **The Founder — Shivon Zilis**\n"
+        "───────────────────────────────\n"
+        "• Yale — Economics & Philosophy\n"
+        "• IBM — Cognitive Computing\n"
+        "• Founding team, Bloomberg Beta\n"
+        "• Forbes 30 Under 30 (2015)\n"
+        "• OpenAI — founding adviser (2016), board member (2020–2023)\n"
+        "• Tesla — Project Director, Autopilot & chip design (2017–2019)\n"
+        "• Neuralink — Director of Operations & Special Projects\n\n"
+        "She has operated at the intersection of AI, compute infrastructure, and capital for over a decade.\n\n"
+        "The Indonesia AI Grid is her infrastructure thesis — build the compute layer for Southeast Asia before the market prices it.\n\n"
+        "📩 Institutional inquiries: **contact@aigrid.id**"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Plain-language risk disclosure"""
+    text = (
+        "⚠️ **Risk Disclosure**\n"
+        "───────────────────────────────\n"
+        "• This is a private, forward-looking infrastructure investment.\n"
+        "• **Capital is at risk.** No returns are guaranteed.\n"
+        "• All metrics (20% preferred, 42.5% IRR, 3.8x MOIC) are **targets**, not promises.\n"
+        "• The investment is illiquid — 3-year term, no early withdrawal.\n"
+        "• Payouts are tied to asset performance, not new capital inflows.\n"
+        "• Participation runs through **AI Grid Batam Infrastructure SPV**.\n\n"
+        "Full disclosure: https://ai-gr.netlify.app\n\n"
+        "📩 Diligence pack: **contact@aigrid.id**"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Current project milestones"""
+    text = (
+        "📊 **Project Status**\n"
+        "───────────────────────────────\n"
+        "• **Land** — Allocation in progress within Batam SEZ\n"
+        "• **Power** — 150kV dual-feed framework with PLN Batam\n"
+        "• **Cooling** — Direct-to-chip architecture finalized, PUE < 1.15\n"
+        "• **Syndication** — Phase 1 open\n"
+        "• **Founding Board** — 10 seats being formalized\n\n"
+        "Detailed milestone schedule and diligence pack are provided to qualified participants.\n\n"
+        "📩 Diligence pack: **contact@aigrid.id**"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 # Handlers
 custom_amount_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(prompt_custom_amount, pattern="^amount_custom$")],
@@ -378,12 +530,17 @@ custom_amount_handler = ConversationHandler(
 )
 
 telegram_app.add_handler(CommandHandler("start", start))
+# [ADDED — NEW COMMANDS]
+telegram_app.add_handler(CommandHandler("founder", cmd_founder))
+telegram_app.add_handler(CommandHandler("risk", cmd_risk))
+telegram_app.add_handler(CommandHandler("status", cmd_status))
 telegram_app.add_handler(custom_amount_handler)
 telegram_app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(show_tiers, pattern="^show_tiers$"))
 telegram_app.add_handler(CallbackQueryHandler(show_calculator, pattern="^show_calculator$"))
 telegram_app.add_handler(CallbackQueryHandler(allocate_menu, pattern="^allocate_menu$"))
-telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|10000|50000)$"))
+# [UPDATED — amount callbacks now include 25000 and 100000]
+telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|25000|100000)$"))
 telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
 telegram_app.add_handler(CallbackQueryHandler(show_qr_handler, pattern="^show_qr$"))
 telegram_app.add_handler(CallbackQueryHandler(back_to_invoice_handler, pattern="^back_to_invoice$"))
