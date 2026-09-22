@@ -1,6 +1,9 @@
 import os
 import logging
 import time
+import hmac
+import hashlib
+import asyncio
 import httpx
 from collections import defaultdict
 from fastapi import FastAPI, Request, Response
@@ -25,21 +28,30 @@ NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1"
 
+# ============================================================
+# [ADDED — SECURITY] IPN secret for HMAC-SHA512 signature verification
+# ============================================================
+NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
+
 # Conversation State
 WAITING_CUSTOM_AMOUNT = 1
 
 # ============================================================
 # [ADDED — ANTI-BOT CONFIG]
-# Rate limits, caps, and sanity thresholds to protect NOWPayments
 # ============================================================
-INVOICE_COOLDOWN_SECONDS = 90          # 1 invoice per user per 90 seconds
-DAILY_INVOICE_CAP = 10                  # max 10 invoices per user per day
-MAX_AMOUNT_USD = 10_000_000             # hard cap on single allocation
-MIN_AMOUNT_USD = 1_000                  # raised from $100 to $1,000
-SUSPICIOUS_REPEAT_WINDOW = 300          # 5 minutes — same amount = flag
+INVOICE_COOLDOWN_SECONDS = 90
+DAILY_INVOICE_CAP = 10
+MAX_AMOUNT_USD = 10_000_000
+MIN_AMOUNT_USD = 1_000
+SUSPICIOUS_REPEAT_WINDOW = 300
 
-# In-memory rate tracker — survives across conversations
-# Structure: { user_id: { "last_invoice_ts": float, "daily_count": int, "daily_reset_ts": float, "recent_amounts": [(ts, amount), ...] } }
+# ============================================================
+# [ADDED — IDEMPOTENCY] Prevent duplicate webhook processing
+# ============================================================
+PROCESSED_ORDERS = set()
+PROCESSED_ORDERS_MAX = 5000  # cap memory
+
+# In-memory rate tracker
 RATE_TRACKER = defaultdict(lambda: {
     "last_invoice_ts": 0.0,
     "daily_count": 0,
@@ -47,7 +59,7 @@ RATE_TRACKER = defaultdict(lambda: {
     "recent_amounts": []
 })
 
-# Crypto ticker mapping for NOWPayments API
+# Crypto ticker mapping
 CRYPTO_MAP = {
     "usdttrc20": {"label": "USDT (TRC-20)", "ticker": "usdttrc20"},
     "usdterc20": {"label": "USDT (ERC-20)", "ticker": "usdterc20"},
@@ -59,18 +71,15 @@ CRYPTO_MAP = {
     "bnb": {"label": "BNB (BEP-20)", "ticker": "bnbmainnet"}
 }
 
-# Initialize Telegram application globally
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logging.info("Telegram bot polling started successfully via FastAPI lifespan!")
     yield
-    # Shutdown
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
@@ -78,12 +87,142 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# ============================================================
+# [ADDED — SECURITY HELPERS]
+# ============================================================
+def verify_nowpayments_signature(raw_body: bytes, signature_header: str) -> bool:
+    """
+    Verify that a webhook payload was genuinely signed by NOWPayments
+    using HMAC-SHA512 with the IPN secret.
+    """
+    if not NOWPAYMENTS_IPN_SECRET:
+        logging.warning("NOWPAYMENTS_IPN_SECRET not configured — signature verification disabled!")
+        return False
+    if not signature_header:
+        return False
+    expected = hmac.new(
+        NOWPAYMENTS_IPN_SECRET.encode(),
+        raw_body,
+        hashlib.sha512
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
+
+def is_duplicate_order(order_id: str) -> bool:
+    """
+    Returns True if this order has already been processed.
+    Adds it to the processed set if new.
+    """
+    if not order_id:
+        return True
+    if order_id in PROCESSED_ORDERS:
+        return True
+    PROCESSED_ORDERS.add(order_id)
+    # Cap memory — drop oldest entries when over limit
+    if len(PROCESSED_ORDERS) > PROCESSED_ORDERS_MAX:
+        # Remove a batch of oldest — sets are unordered, but this bounds growth
+        for _ in range(len(PROCESSED_ORDERS) - PROCESSED_ORDERS_MAX):
+            PROCESSED_ORDERS.pop()
+    return False
+
+async def nowpayments_request_with_retry(payload: dict, headers: dict, max_attempts: int = 3) -> dict:
+    """
+    POST to NOWPayments with exponential backoff on transient errors.
+    Prevents spammy retry patterns that trigger abuse detection.
+    """
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{NOWPAYMENTS_API_URL}/payment",
+                    json=payload,
+                    headers=headers
+                )
+                # Success
+                if response.status_code == 200:
+                    return response.json()
+                # Retryable errors
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    wait = 2 ** attempt
+                    logging.warning(f"NOWPayments returned {response.status_code} — retrying in {wait}s (attempt {attempt+1}/{max_attempts})")
+                    await asyncio.sleep(wait)
+                    last_error = f"HTTP {response.status_code}"
+                    continue
+                # Non-retryable — return as-is
+                return response.json()
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            wait = 2 ** attempt
+            logging.warning(f"NOWPayments network error: {e} — retrying in {wait}s (attempt {attempt+1}/{max_attempts})")
+            await asyncio.sleep(wait)
+            last_error = str(e)
+        except Exception as e:
+            logging.error(f"Unexpected error in NOWPayments call: {e}")
+            raise
+    raise Exception(f"NOWPayments unavailable after {max_attempts} attempts. Last error: {last_error}")
+
+def check_user_rate_limit(user_id: int, amount: float) -> tuple[bool, str]:
+    now = time.time()
+    tracker = RATE_TRACKER[user_id]
+    
+    if now - tracker["daily_reset_ts"] > 86400:
+        tracker["daily_count"] = 0
+        tracker["daily_reset_ts"] = now
+    
+    if now - tracker["last_invoice_ts"] < INVOICE_COOLDOWN_SECONDS:
+        wait = int(INVOICE_COOLDOWN_SECONDS - (now - tracker["last_invoice_ts"]))
+        return False, f"⏱️ Please wait **{wait} seconds** between allocation attempts. This protects the payment gateway."
+    
+    if tracker["daily_count"] >= DAILY_INVOICE_CAP:
+        return False, "📊 Daily allocation limit reached. Please try again tomorrow or contact support at **contact@aigrid.id**."
+    
+    recent = [a for (ts, a) in tracker["recent_amounts"] if now - ts < SUSPICIOUS_REPEAT_WINDOW]
+    if len(recent) >= 3 and all(abs(a - amount) < 0.01 for a in recent[-3:]):
+        return False, "🔒 Repeated identical allocations flagged for review. Please contact **contact@aigrid.id** to proceed."
+    
+    if amount > MAX_AMOUNT_USD:
+        return False, f"⚠️ Amount exceeds the automated allocation limit. For allocations above ${MAX_AMOUNT_USD:,.0f}, please contact **contact@aigrid.id** directly."
+    
+    return True, ""
+
+def record_invoice_attempt(user_id: int, amount: float):
+    now = time.time()
+    tracker = RATE_TRACKER[user_id]
+    tracker["last_invoice_ts"] = now
+    tracker["daily_count"] += 1
+    tracker["recent_amounts"].append((now, amount))
+    tracker["recent_amounts"] = tracker["recent_amounts"][-10:]
+
+# ============================================================
+# [UPDATED — WEBHOOK]
+# Now: raw body read, HMAC verification, idempotency check
+# ============================================================
 @app.post("/webhook/nowpayments")
 async def nowpayments_webhook(request: Request):
-    data = await request.json()
+    # Read the RAW body — signature verification needs the exact bytes
+    raw_body = await request.body()
+    signature = request.headers.get("x-nowpayments-sig", "")
+    
+    # Step 1: Verify HMAC signature
+    if not verify_nowpayments_signature(raw_body, signature):
+        logging.warning("Rejected webhook — invalid or missing HMAC signature")
+        return Response(status_code=401)
+    
+    # Step 2: Parse JSON now that signature is verified
+    try:
+        data = await request.json()
+    except Exception as e:
+        logging.error(f"Invalid JSON in verified webhook: {e}")
+        return Response(status_code=400)
+    
     payment_status = data.get("payment_status")
     order_id = data.get("order_id")
     
+    # Step 3: Idempotency — skip if we've already processed this order
+    if is_duplicate_order(order_id):
+        logging.info(f"Duplicate webhook ignored for order_id={order_id}")
+        return Response(status_code=200)
+    
+    # Step 4: Process valid confirmed payment
     if payment_status in ["finished", "confirmed"] and order_id:
         try:
             telegram_user_id = int(order_id.split("_")[-1])
@@ -99,54 +238,10 @@ async def nowpayments_webhook(request: Request):
     return Response(status_code=200)
 
 # ============================================================
-# [ADDED — ANTI-BOT HELPERS]
-# All rate-limit logic lives here
+# [UNCHANGED] All bot handlers below — no edits
 # ============================================================
-def check_user_rate_limit(user_id: int, amount: float) -> tuple[bool, str]:
-    """
-    Returns (allowed, reason).
-    If allowed=False, reason contains the message to show the user.
-    """
-    now = time.time()
-    tracker = RATE_TRACKER[user_id]
-    
-    # Reset daily counter if 24h passed
-    if now - tracker["daily_reset_ts"] > 86400:
-        tracker["daily_count"] = 0
-        tracker["daily_reset_ts"] = now
-    
-    # Layer 1 — cooldown between invoices
-    if now - tracker["last_invoice_ts"] < INVOICE_COOLDOWN_SECONDS:
-        wait = int(INVOICE_COOLDOWN_SECONDS - (now - tracker["last_invoice_ts"]))
-        return False, f"⏱️ Please wait **{wait} seconds** between allocation attempts. This protects the payment gateway."
-    
-    # Layer 2 — daily cap
-    if tracker["daily_count"] >= DAILY_INVOICE_CAP:
-        return False, "📊 Daily allocation limit reached. Please try again tomorrow or contact support at **contact@aigrid.id**."
-    
-    # Layer 3 — same amount repeated too often in short window
-    recent = [a for (ts, a) in tracker["recent_amounts"] if now - ts < SUSPICIOUS_REPEAT_WINDOW]
-    if len(recent) >= 3 and all(abs(a - amount) < 0.01 for a in recent[-3:]):
-        return False, "🔒 Repeated identical allocations flagged for review. Please contact **contact@aigrid.id** to proceed."
-    
-    # Layer 4 — amount sanity checks
-    if amount > MAX_AMOUNT_USD:
-        return False, f"⚠️ Amount exceeds the automated allocation limit. For allocations above ${MAX_AMOUNT_USD:,.0f}, please contact **contact@aigrid.id** directly."
-    
-    return True, ""
-
-def record_invoice_attempt(user_id: int, amount: float):
-    """Record a successful invoice creation for rate limiting."""
-    now = time.time()
-    tracker = RATE_TRACKER[user_id]
-    tracker["last_invoice_ts"] = now
-    tracker["daily_count"] += 1
-    tracker["recent_amounts"].append((now, amount))
-    # Keep only last 10 entries
-    tracker["recent_amounts"] = tracker["recent_amounts"][-10:]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executive Dynamic Onboarding Flow"""
     welcome_text = (
         "⚡ **AI GRID INDONESIA | Sovereign Compute Syndicate**\n"
         "───────────────────────────────\n"
@@ -312,6 +407,10 @@ async def show_crypto_selection(query, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ============================================================
+# [UPDATED — generate_invoice]
+# Now uses retry helper + rate limit + records attempt
+# ============================================================
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -322,10 +421,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     amount = context.user_data.get("invest_amount", 1000.0)
     
-    # ============================================================
-    # [ADDED — ANTI-BOT CHECK]
-    # Run rate limits before touching NOWPayments
-    # ============================================================
+    # Anti-bot check
     allowed, reason = check_user_rate_limit(user_id, amount)
     if not allowed:
         await query.edit_message_text(
@@ -347,51 +443,44 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{NOWPAYMENTS_API_URL}/payment", json=payload, headers=headers)
-            data = response.json()
+        data = await nowpayments_request_with_retry(payload, headers)
+        
+        if "pay_address" in data:
+            pay_address = data["pay_address"]
+            pay_amount = data["pay_amount"]
+            pay_currency = data["pay_currency"].upper()
             
-            if "pay_address" in data:
-                pay_address = data["pay_address"]
-                pay_amount = data["pay_amount"]
-                pay_currency = data["pay_currency"].upper()
-                
-                # Save session data for toggling QR code view
-                context.user_data["pay_address"] = pay_address
-                context.user_data["pay_amount"] = pay_amount
-                context.user_data["pay_currency"] = pay_currency
-                context.user_data["crypto_label"] = crypto_info["label"]
-                
-                # ============================================================
-                # [ADDED — ANTI-BOT RECORD]
-                # Record successful invoice for rate tracking
-                # ============================================================
-                record_invoice_attempt(user_id, amount)
-                
-                invoice_text = (
-                    f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
-                    f"───────────────────────────────\n"
-                    f"• **USD Value:** ${amount:,.2f} USD\n"
-                    f"• **Asset:** {crypto_info['label']}\n"
-                    f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
-                    f"📍 **Deposit Address:**\n"
-                    f"`{pay_address}`\n\n"
-                    f"⚠️ *Important:* Send the exact amount above. Your participation will be recorded automatically as soon as the transaction is confirmed on the network."
-                )
-                
-                keyboard = [
-                    [InlineKeyboardButton("📱 Do you need a QR code?", callback_data="show_qr")],
-                    [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
-                    [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
-                ]
-                await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-            else:
-                logging.error(f"NOWPayments Error: {data}")
-                await query.edit_message_text(
-                    "❌ **Gateway Timeout:** Error creating crypto invoice. Please try again or contact support.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Try Again", callback_data="allocate_menu")]]),
-                    parse_mode="Markdown"
-                )
+            context.user_data["pay_address"] = pay_address
+            context.user_data["pay_amount"] = pay_amount
+            context.user_data["pay_currency"] = pay_currency
+            context.user_data["crypto_label"] = crypto_info["label"]
+            
+            record_invoice_attempt(user_id, amount)
+            
+            invoice_text = (
+                f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
+                f"───────────────────────────────\n"
+                f"• **USD Value:** ${amount:,.2f} USD\n"
+                f"• **Asset:** {crypto_info['label']}\n"
+                f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
+                f"📍 **Deposit Address:**\n"
+                f"`{pay_address}`\n\n"
+                f"⚠️ *Important:* Send the exact amount above. Your participation will be recorded automatically as soon as the transaction is confirmed on the network."
+            )
+            
+            keyboard = [
+                [InlineKeyboardButton("📱 Do you need a QR code?", callback_data="show_qr")],
+                [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
+                [InlineKeyboardButton("📩 Contact Support", url="https://t.me/contactaigrid")]
+            ]
+            await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        else:
+            logging.error(f"NOWPayments Error: {data}")
+            await query.edit_message_text(
+                "❌ **Gateway Timeout:** Error creating crypto invoice. Please try again or contact support.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Try Again", callback_data="allocate_menu")]]),
+                parse_mode="Markdown"
+            )
     except Exception as e:
         logging.error(f"Exception generating invoice: {e}")
         await query.edit_message_text("❌ Connection error. Please try again later.")
@@ -467,12 +556,7 @@ async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=reply_markup
     )
 
-# ============================================================
-# [ADDED — NEW COMMANDS]
-# Founder, Risk, Status
-# ============================================================
 async def cmd_founder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Speaks about the founder — Shivon Zilis"""
     text = (
         "👤 **The Founder — Shivon Zilis**\n"
         "───────────────────────────────\n"
@@ -490,7 +574,6 @@ async def cmd_founder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Plain-language risk disclosure"""
     text = (
         "⚠️ **Risk Disclosure**\n"
         "───────────────────────────────\n"
@@ -506,7 +589,6 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Current project milestones"""
     text = (
         "📊 **Project Status**\n"
         "───────────────────────────────\n"
@@ -530,7 +612,6 @@ custom_amount_handler = ConversationHandler(
 )
 
 telegram_app.add_handler(CommandHandler("start", start))
-# [ADDED — NEW COMMANDS]
 telegram_app.add_handler(CommandHandler("founder", cmd_founder))
 telegram_app.add_handler(CommandHandler("risk", cmd_risk))
 telegram_app.add_handler(CommandHandler("status", cmd_status))
@@ -539,7 +620,6 @@ telegram_app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(show_tiers, pattern="^show_tiers$"))
 telegram_app.add_handler(CallbackQueryHandler(show_calculator, pattern="^show_calculator$"))
 telegram_app.add_handler(CallbackQueryHandler(allocate_menu, pattern="^allocate_menu$"))
-# [UPDATED — amount callbacks now include 25000 and 100000]
 telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|25000|100000)$"))
 telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
 telegram_app.add_handler(CallbackQueryHandler(show_qr_handler, pattern="^show_qr$"))
