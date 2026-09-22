@@ -80,7 +80,7 @@ WAITING_RECOVER_CONTACT = 4
 INVOICE_COOLDOWN_SECONDS = 90
 DAILY_INVOICE_CAP = 10
 MAX_AMOUNT_USD = 10_000_000
-MIN_AMOUNT_USD = 1_000
+MIN_AMOUNT_USD = 100
 SUSPICIOUS_REPEAT_WINDOW = 300
 
 PROCESSED_ORDERS = set()
@@ -454,7 +454,7 @@ async def allocate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("$5,000 — Syndicate Entry", callback_data="amount_5000")],
         [InlineKeyboardButton("$25,000 — Institutional Entry", callback_data="amount_25000")],
         [InlineKeyboardButton("$100,000 — Anchor Entry", callback_data="amount_100000")],
-        [InlineKeyboardButton("✍️ Custom Amount ($1,000+)", callback_data="amount_custom")],
+        [InlineKeyboardButton("✍️ Custom Amount", callback_data="amount_custom")],
         [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
     ]
     await query.edit_message_text(menu_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -472,7 +472,7 @@ async def prompt_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(
         "✍️ **Custom Allocation Amount**\n\n"
         "Please reply with the exact USD amount you wish to allocate (e.g. `3500` or `75000`).\n\n"
-        "*(Minimum allocation: $1,000 USD)*",
+        "*(Minimum: $100 USD for testing — full tiers start at $1,000)*",
         parse_mode="Markdown"
     )
     return WAITING_CUSTOM_AMOUNT
@@ -482,7 +482,7 @@ async def receive_custom_amount(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         val = float(text)
         if val < MIN_AMOUNT_USD:
-            await update.message.reply_text(f"❌ Minimum allocation is ${MIN_AMOUNT_USD:,} USD.")
+            await update.message.reply_text(f"❌ Minimum is ${MIN_AMOUNT_USD:,} USD. Please enter a higher value:")
             return WAITING_CUSTOM_AMOUNT
         if val > MAX_AMOUNT_USD:
             await update.message.reply_text(f"⚠️ Amounts above ${MAX_AMOUNT_USD:,} require direct contact: **{CONTACT_EMAIL}**", parse_mode="Markdown")
@@ -1453,7 +1453,7 @@ async def send_restart_announcement():
     if not TELEGRAM_CHANNEL_ID:
         return
     text = (
-        "🚀 **AI GRID INDONESIA | Back Online**\n\n"
+        "🚀 AI GRID INDONESIA | Back Online\n\n"
         "Our unified bot is now live — investor portal, channel updates, and Elon ecosystem intelligence in one place.\n\n"
         "• 50MW Tier-IV Batam Compute Hub\n"
         "• 20.0% Preferred Dividend per 30-day cycle\n"
@@ -1463,14 +1463,15 @@ async def send_restart_announcement():
         "👉 Bot: @aigridid_bot"
     )
     try:
-        await safe_channel_send_photo(
-            photo_url="https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg",
+        await telegram_app.bot.send_photo(
+            chat_id=TELEGRAM_CHANNEL_ID,
+            photo="https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg",
             caption=text
         )
         logger.info("Startup announcement sent.")
     except Exception as e:
         logger.error(f"Startup announcement failed: {e}")
-
+        
 async def scheduled_channel_broadcast():
     if CHANNEL_STATE["scheduler_paused"]:
         logger.info("Scheduler paused — skipping broadcast.")
