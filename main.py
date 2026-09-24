@@ -155,13 +155,17 @@ async def lifespan(app: FastAPI):
     logger.info("Telegram bot polling started.")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(scheduled_channel_broadcast, "cron", hour=8, minute=0, id="morning_brief")
-    scheduler.add_job(scheduled_channel_broadcast, "cron", hour=18, minute=0, id="evening_brief")
+    # 5 scheduled posts per day + weekly roundup + admin reminders
+    scheduler.add_job(scheduled_morning_brief, "cron", hour=6, minute=0, id="morning_brief")
+    scheduler.add_job(scheduled_midday_update, "cron", hour=10, minute=0, id="midday_update")
+    scheduler.add_job(scheduled_afternoon_update, "cron", hour=14, minute=0, id="afternoon_update")
+    scheduler.add_job(scheduled_evening_brief, "cron", hour=18, minute=0, id="evening_brief")
+    scheduler.add_job(scheduled_night_update, "cron", hour=22, minute=0, id="night_update")
     scheduler.add_job(scheduled_weekly_roundup, "cron", day_of_week="sun", hour=18, minute=0, id="weekly_roundup")
     scheduler.add_job(scheduled_payout_reminder, "cron", day=1, hour=9, minute=0, id="payout_reminder")
     scheduler.add_job(scheduled_monthly_statements, "cron", day=1, hour=10, minute=0, id="monthly_statements")
     scheduler.start()
-    logger.info("Scheduler started — UTC timezone.")
+    logger.info("Scheduler started — UTC timezone, 5 posts/day.")
 
     await send_restart_announcement()
 
@@ -1562,7 +1566,7 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Total Capital Raised:** ${total_raised:,.2f}\n"
         f"• **Total Payouts Sent:** ${total_payouts:,.2f}\n"
         f"• **Pending This Cycle:** ${pending_payout:,.2f}\n"
-        f"• **Next Scheduled Broadcast:** 08:00 / 18:00 UTC\n"
+        f"• **Posts/day:** 5 (06:00 / 10:00 / 14:00 / 18:00 / 22:00 UTC)\n"
         f"• **Scheduler:** {'⏸️ PAUSED' if CHANNEL_STATE['scheduler_paused'] else '▶️ ACTIVE'}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -1654,11 +1658,12 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Export failed: {e}")
         await update.message.reply_text(f"❌ Export failed: {e}")
-        
+
 # ============================================================
 # CHANNEL CONTENT POOLS
 # ============================================================
 
+# ─── FRONTIER COMPUTE BRIEFINGS (60+) ───
 FRONTIER_COMPUTE_BRIEFINGS = [
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nProcessing real-time neural signals requires sub-10ms round-trip latency — tighter than most financial trading infrastructure.\n\nThis is why compute facilities positioned at the edge of major fiber corridors matter. Batam to Singapore: under 2.5ms.\n\nAI Grid Indonesia — built for the next class of workloads.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nThe line between AI and neuroscience is blurring. Neural networks inspired by brain architecture. Brain-computer interfaces powered by deep learning.\n\nThe compute demands of this convergence are enormous — and require infrastructure traditional data centers were not built for.\n\nThis is the thesis behind AI Grid Indonesia.",
@@ -1688,7 +1693,7 @@ FRONTIER_COMPUTE_BRIEFINGS = [
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nWhy neural-class workloads need regional infrastructure:\n\n• Data sovereignty laws\n• Latency requirements (sub-10ms)\n• Real-time processing for medical applications\n• Continuous uptime for clinical use\n\nCloud does not solve all four. Dedicated regional infrastructure does.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nThe most expensive thing in AI is not the chip. It is the power.\n\nChips cost $30k–$50k each. But the power to run them for three years costs more. Cooling adds another layer. Land, connectivity, and redundancy stack on top.\n\nInfrastructure is where the money actually goes.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nWhy 120kW per rack is the new standard:\n\n• NVIDIA Blackwell B200 clusters need it\n• Next-generation inference requires it\n• Neural signal processing demands it\n\nAir cooling caps at 40kW. This is why liquid is now table stakes.",
-    "🧠 **FRONTIER COMPUTE BRIEFING**\n\nThe Southeast Asia advantage nobody talks about:\n\n• Young, technical workforce\n• Government alignment on AI and data centers\n• 100 policy% foreign ownership permitted in SEZs\n• Tax holidays up support to 20 years\n\nThis is what for compute looks like.",
+    "🧠 **FRONTIER COMPUTE BRIEFING**\n\nThe Southeast Asia advantage nobody talks about:\n\n• Young, technical workforce\n• Government alignment on AI and data centers\n• 100% foreign ownership permitted in SEZs\n• Tax holidays up to 20 years\n\nThis is what policy support for compute looks like.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nEvery compute cycle has a bottleneck.\n\n1990s: CPU speed. 2000s: bandwidth. 2010s: storage. 2020s: power and cooling.\n\nThe winners of the 2030s will be whoever solved the power problem in the 2020s.\n\nThis is why AI Grid Indonesia exists.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nLiquid cooling is not a marketing feature. It is a physical necessity.\n\nAt 40kW per rack, air works. At 120kW, you need liquid flowing through cold plates directly on the chip die.\n\nNo liquid, no Blackwell. No Blackwell, no next-generation AI.",
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nWhy we chose Batam and not anywhere else:\n\n• Sub-2.5ms to Singapore (capital markets, cloud, research)\n• Direct subsea fiber to Jakarta and Hong Kong\n• 15-year 0% corporate tax under SEZ framework\n• Sovereign land title with 80+ year lease\n\nGeography is strategy.",
@@ -1721,7 +1726,7 @@ FRONTIER_COMPUTE_BRIEFINGS = [
     "🧠 **FRONTIER COMPUTE BRIEFING**\n\nWhy we chose 2026 to launch:\n\n• AI demand inflection is here\n• Power constraints are now binding\n• Capital is moving to infrastructure\n• Southeast Asia is underbuilt relative to demand\n\nThe window is open now. It will not be in three years.",
 ]
 
-# --- AI Grid News Dataset ---
+# ─── AI GRID NEWS DATASET (100+ items) ───
 AI_GRID_NEWS_DATASET = [
     {"title": "AI Grid Indonesia Deploys Direct-to-Chip Liquid Cooling in Batam Phase-1", "description": "Achieving a PUE under 1.15, the Batam SEZ 50MW facility sets a new benchmark for energy efficiency in Southeast Asian hyperscale AI compute.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Infrastructure"},
     {"title": "Batam SEZ Secures Subsea Fiber Interconnectivity Under 2.5ms to Singapore", "description": "Ultra-low latency routing connects AI Grid Indonesia directly to major regional financial hubs, ensuring high-speed throughput for LLM training.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
@@ -1743,9 +1748,83 @@ AI_GRID_NEWS_DATASET = [
     {"title": "Syndicate Growth: Expanding Phase-2 Capacity Planning in Batam", "description": "Looking ahead at upcoming land acquisition and electrical grid capacity expansions for our 2027 roadmap.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Syndication"},
     {"title": "Global Semiconductor Supply Chains and Data Center Readiness", "description": "Navigating logistics and hardware procurement timelines to ensure on-schedule rack deployment.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
     {"title": "Enhanced Security Protocols Across AI Grid Portal Infrastructure", "description": "Implementing multi-factor authentication, hardware-secured session tokens, and encrypted bot ledger verification.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Singapore Data Center Moratorium: The Structural Supply Gap", "description": "Singapore's PUE floor of 1.25 and land constraints push high-density compute offshore. Batam absorbs the overflow.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Market Trends"},
+    {"title": "Indonesia Government Names AI and Data Centers as National Priority", "description": "Coordinating Minister Airlangga Hartarto targets a 1.17GW data center pipeline and 600,000 digital professionals.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "The SIJORI Corridor: Singapore-Johor-Batam Integration", "description": "The first integrated cross-border data center platform in Southeast Asia is being built today.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "DayOne Signs 450MW PPA with PLN Batam: Peer Benchmark", "description": "Indonesia's largest data center power agreement signals institutional confidence in Batam's compute corridor.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Oracle Launches Indonesia North Cloud Region in Batam", "description": "Major hyperscalers are moving into Batam, validating the region's compute thesis.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Nongsa Digital Park: 13 Data Centers, ~800MW Pipeline", "description": "The Batam SEZ is scaling toward gigawatt-class compute capacity.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Telkom NeutraDC Nxera: 18MW Hyperscale Facility in Development", "description": "Domestic infrastructure players are entering the Batam compute market at scale.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "100% Foreign Ownership Permitted for Data Centers in SEZs", "description": "Indonesia's 2021 reforms allow full foreign ownership for data center projects in special economic zones.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "Ministry of Transmigration Prepares Workforce for Batam AI Investment", "description": "Indonesia is building the human capital required to support massive AI data center expansion.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "Asia-Pacific Data Center Capacity Scaling at ~19.6% CAGR", "description": "Industry estimates project explosive growth in regional hyperscale capacity through 2030.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Why Foreign Capital Is Moving to Southeast Asian Compute", "description": "Power costs, tax incentives, and government alignment are converging in Indonesia.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Market Trends"},
+    {"title": "Batam Live Capacity: ~126MW, Pipeline: ~1.4GW", "description": "The Batam SEZ is scaling aggressively toward becoming Southeast Asia's primary compute hub.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Hyperscale Dominates ~71% of Batam's Data Center Segment", "description": "AI workloads are driving the shift toward higher-density, liquid-cooled facilities.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Market Trends"},
+    {"title": "Singapore Overflow Demand Exceeds Batam's Entire Live Capacity", "description": "The demand curve for high-density compute is structurally unmatched by current supply.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Market Trends"},
+    {"title": "The Strategic Case for Batam as the APAC AI Gateway", "description": "Sub-2.5ms to Singapore, 0% corporate tax, sovereign land — the three pillars of compute strategy.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "Tier-IV Design Standard: What It Means for AI Compute", "description": "Fault-tolerant with concurrent maintainability — no single point of failure. The foundation AI workloads require.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Hardware"},
+    {"title": "120kW Per Rack: The New Density Standard for AI Clusters", "description": "Older facilities cap at 40kW. Modern AI infrastructure requires 3x that density.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Hardware"},
+    {"title": "Closed-Loop Direct-to-Chip Liquid Cooling Explained", "description": "Dielectric liquid coolant flows directly across chip dies to maintain thermal equilibrium at maximum load.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Hardware"},
+    {"title": "PUE Below 1.15: The Efficiency Threshold That Changes Economics", "description": "Every watt saved on cooling is a watt available for compute. This is where margins come from.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Infrastructure"},
+    {"title": "N+2 Power Redundancy: Eliminating Downtime at Scale", "description": "Dual 150kV feeds via PLN Batam with full N+2 architecture — zero single point of failure.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Subsea Fiber Topology: The Physics of Sub-2.5ms Latency", "description": "Data travels at the speed of light. Distance equals latency. Batam sits on the shortest fiber route to Singapore.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "Sovereign Land Title and 80+ Year Lease Security", "description": "Physical asset backing with clear legal title — the foundation for institutional investment.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "SEZ Tax Framework: 15 Years at 0% Corporate Income Tax", "description": "The Batam SEZ grants long-duration tax holidays to infrastructure projects — the difference between marginal and exceptional net returns.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "AI Grid Batam Infrastructure SPV: The Legal Structure Explained", "description": "All participation routes through one SPV with clear contracts and power agreements.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "Why 50MW Is the Right Size for Phase-1", "description": "Large enough for institutional capital, focused enough to deliver within a defined window.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Emergency Backup Systems: Diesel Generators and Load Bank Testing", "description": "72-hour continuous load bank testing validates on-demand generator capacity.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Fire Suppression for Electronics-Intensive Environments", "description": "Clean-agent gaseous suppression systems designed specifically for high-density GPU halls.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Biometric Access Control and Multi-Layer Physical Security", "description": "Military-grade scanners and biometric checkpoints protecting the facility perimeter.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Network Fabric and InfiniBand Switching for LLM Training", "description": "Low-latency interconnects enabling distributed training across thousands of GPUs.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Hardware"},
+    {"title": "20% Preferred Dividend Per 30-Day Cycle: Structure and Priority", "description": "Preferred holders receive distributions before common equity — priority economics at every payout.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "42.5% Target Net IRR: Modeling the Returns", "description": "Full-year preferred distributions combined with 3.8x MOIC target over 3-year term.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "3.8x Target MOIC: From $1 to $3.80 Over 3 Years", "description": "Multiple on invested capital combining preferred distributions plus terminal value.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "Why 30-Day Payout Cycles Matter for Investor Cashflow", "description": "Monthly distributions provide liquidity and predictable cashflow unmatched by typical infrastructure investments.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "Bank Transfer or Crypto: Flexible Payout Options", "description": "Choose USDT TRC-20, ERC-20, USDC, BTC, ETH, SOL, or BNB for distribution receipt.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Syndication Tier Structure: Micro to Anchor", "description": "From $1,000 Micro to $100,000+ Anchor — every tier shares the same 20% preferred return structure.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Syndication"},
+    {"title": "Founding Board: 10 Seats, $50M Each, $500M Commitment", "description": "Governance-level participation for strategic infrastructure investors.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Syndication"},
+    {"title": "Inflation Hedging Through Hard-Asset Backed Returns", "description": "Physical compute infrastructure remains one of the strongest inflation-resistant asset classes.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "Why Institutional Allocators Prefer Contractual Cashflows", "description": "Enterprise lease agreements deliver predictable distributions — the bedrock of infrastructure yield.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "ASEAN Digital Economy Blueprint and Data Center Expansion", "description": "Regional trade pacts and digital integration policies accelerate demand for high-capacity infrastructure.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Edge Compute Synergies with Autonomous Vehicle Fleets", "description": "Regional data hubs facilitate low-latency inference for autonomous driving networks and smart cities.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "The AI Compute Demand Curve: 2026 Projection", "description": "Every new model generates new inference demand. Every inference requires compute.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Why Power Is the Real Bottleneck in AI Infrastructure", "description": "At scale, compute is worthless without power. This is why we lead with MW capacity.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Customs Facility Integration for Expedited Hardware Clearance", "description": "SEZ bonded warehouse privileges accelerate server rack import timelines.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "Carrier-Neutral Meet-Me-Rooms: Multi-Carrier Interconnection", "description": "Tier-1 global carriers interconnect seamlessly within our Batam facility.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "Subsea Cable Redundancy: Eliminating Single Points of Failure", "description": "Secondary and tertiary underwater fiber routes ensure connectivity resilience.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "Advanced Fire Suppression for High-Density GPU Halls", "description": "Clean-agent gaseous suppression systems designed for electronics-intensive environments.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Structural Steel Framing Reaches Completion in Batam Phase-1", "description": "Engineering milestone: primary architectural frameworks for the main data hall concluded on schedule.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Seismic Resilience Engineering in Batam Data Center Foundations", "description": "Robust pilings and shock-absorbing foundation pads safeguard sensitive server arrays.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Smart Substation Automation and Real-Time Grid Telemetry", "description": "AI-driven load balancing monitors power quality across incoming feeders.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Redundant Water Cooling Loops and Filtration Plant Upgrades", "description": "Continuous closed-loop coolant purity with advanced reverse osmosis and deionization systems.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Power"},
+    {"title": "Intellectual Property Protections in Batam SEZ", "description": "Secure legal environment for international AI and semiconductor innovators.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "Custom Thermal Transfer Plates for Next-Gen Accelerator Chips", "description": "Partnering with thermodynamic engineers to maximize heat dissipation directly off silicon dies.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Hardware"},
+    {"title": "Server Chassis Customization for Optimal Vertical Airflow", "description": "Custom enclosures maximize airflow efficiency in high-density containment aisles.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Hardware"},
+    {"title": "Long-Term PPA Contract Security and Fixed-Rate Power Hedging", "description": "Multi-year power purchase agreements lock in favorable energy tariffs.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "Batam Concession Agreement Compliance and Environmental Audits", "description": "Passing strict environmental impact assessments with flying colors.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "Syndicate Transparency Report Q3: Exceeding Projected Milestones", "description": "Comprehensive audits confirm strong financial performance and ahead-of-schedule construction.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Syndication"},
+    {"title": "Micro-Allocation Tier Milestone: Over 10,000 Active Participants", "description": "Community growth as retail and institutional participants unify around premier compute assets.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Syndication"},
+    {"title": "The Convergence of Robotics, AI, and Hyperscale Data Centers", "description": "Automated server maintenance robots and smart facility management tools.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Platform"},
+    {"title": "Enhanced Security Protocols Across AI Grid Portal Infrastructure", "description": "Multi-factor authentication and hardware-secured session tokens protect investor accounts.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Automated Smart Contract Ledger Sync for Transparent Distributions", "description": "Backend portal infrastructure upgrades ensure verifiable payout ledger recordings.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Bot Portal v3.0: Faster Navigation and Enhanced Portfolio Tracking", "description": "Major UI upgrade bringing real-time earnings calculators directly to investor fingertips.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Platform"},
+    {"title": "Low-Latency Direct Routing for Financial Trading and AI", "description": "Minimizing packet jitter across international subsea conduits for HFT and AI compute clients.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "The Rise of Southeast Asia as a Global AI Compute Supercluster", "description": "Why foreign direct investment is pivoting toward Indonesian renewable-powered data centers.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Unlocking Value in AI Infrastructure Through Liquid Cooling", "description": "How direct-to-chip thermal management transforms the economics of high-density compute.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Infrastructure"},
+    {"title": "Southeast Asia's Data Center Boom: 2026 Outlook", "description": "Regional capacity scaling aggressively through the end of the decade.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
+    {"title": "Real-Time AI Inference and the Future of Distributed Compute", "description": "Why edge-positioned data centers win the next generation of AI workloads.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Market Trends"},
+    {"title": "Understanding the AI Infrastructure Investment Cycle", "description": "Why early positioning in compute corridors precedes outsized returns.", "image": "https://i.postimg.cc/yxQyQscY/IMG-8274.jpg", "category": "Financials"},
+    {"title": "Batam SEZ: 15 Years of 0% Tax Advantage in Detail", "description": "Full breakdown of the corporate income tax exemption framework.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "The Physics of Latency: Why Sub-2.5ms Matters", "description": "Data travels at the speed of light. Every millisecond counts for AI inference.", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "category": "Connectivity"},
+    {"title": "Direct-to-Chip vs Immersion Cooling: A Comparison", "description": "Why direct-to-chip is the pragmatic choice for enterprise AI compute halls.", "image": "https://i.postimg.cc/MTrngTPR/IMG-8275.jpg", "category": "Hardware"},
+    {"title": "Why 100% Foreign Ownership Matters for Institutional Investors", "description": "Indonesia's SEZ framework enables clean international capital participation.", "image": "https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", "category": "Regulation"},
+    {"title": "The Role of N+2 Redundancy in Mission-Critical AI Halls", "description": "Eliminating single points of failure in power delivery.", "image": "https://i.postimg.cc/pLtZLWxk/IMG-8277.jpg", "category": "Power"},
+    {"title": "AI Grid Indonesia: A 2026 Snapshot", "description": "50MW Phase-1 development progressing on schedule with full institutional backing.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Infrastructure"},
+    {"title": "Why AI Compute Infrastructure Is the Decade's Defining Asset Class", "description": "Power, land, cooling, and latency — the four vectors of strategic advantage.", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "category": "Market Trends"},
 ]
 
-# --- Allocator Feedback Pool (130+ entries) ---
+# ─── ALLOCATOR FEEDBACK POOL (130+) ───
 TESTIMONIES_POOL = [
     ("Marcus Sterling", "Managing Partner, Apex Digital Capital, Singapore", "The 20.0% preferred dividend structure combined with Batam's 15-year 0% corporate tax framework provides unmatched yield visibility for our infrastructure portfolio."),
     ("Elena Rostova", "Venture Partner, Hyperion Compute Fund, Zurich", "As global power constraints limit Western data center scaling, projects like AI Grid Indonesia with dual 150kV backups represent the logical future of AI deployment."),
@@ -1906,6 +1985,42 @@ ENGAGEMENT_POOL = [
     "💎 **Asset-Backed Portfolios:** Do you feel safer allocating capital into physical data center hardware rather than speculative digital tokens?\n\n👍 for YES, physical hardware rules\n👎 for NO, prefer digital assets",
 ]
 
+# ─── RSS FEEDS (25+ Elon ecosystem sources) ───
+RSS_FEEDS = [
+    # Tesla
+    "https://www.teslarati.com/feed/",
+    "https://electrek.co/guides/tesla/feed/",
+    "https://insideevs.com/rss/articles/all/",
+    "https://cleantechnica.com/tag/tesla/feed/",
+    "https://www.teslaoracle.com/feed/",
+    # SpaceX
+    "https://www.nasaspaceflight.com/feed/",
+    "https://spacenews.com/feed/",
+    "https://www.space.com/feeds/all",
+    "https://arstechnica.com/space/feed/",
+    "https://www.universetoday.com/feed/",
+    # AI
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://venturebeat.com/category/ai/feed/",
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+    "https://www.wired.com/feed/tag/ai/latest/rss",
+    "https://arstechnica.com/ai/feed/",
+    # Neuralink / Neuro
+    "https://www.medicalnewstoday.com/rss/neurology.xml",
+    "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml",
+    "https://www.fiercebiotech.com/rss/xml",
+    "https://www.statnews.com/feed/",
+    # Musk ecosystem general
+    "https://www.teslarati.com/category/spacex/feed/",
+    "https://www.thestreet.com/rss/news",
+    "https://futurism.com/feed",
+    "https://www.businessinsider.com/rss",
+    "https://www.reuters.com/rssFeed/technologyNews",
+    "https://feeds.bloomberg.com/technology/news.rss",
+    "https://www.axios.com/feeds/feed.rss",
+    "https://www.theinformation.com/feed",
+]
+
 _used_news_indices = []
 _used_testimony_indices = []
 _used_ad_indices = []
@@ -1961,14 +2076,6 @@ def get_engagement():
     idx = _pick_unused(len(ENGAGEMENT_POOL), _used_engagement_indices)
     return {"type": "text", "text": ENGAGEMENT_POOL[idx]}
 
-RSS_FEEDS = [
-    "https://feeds.feedburner.com/teslarati",
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://www.theverge.com/rss/index.xml",
-    "https://www.wired.com/feed/rss",
-    "https://venturebeat.com/category/ai/feed/",
-]
-
 def fetch_rss_item():
     try:
         feed_url = random.choice(RSS_FEEDS)
@@ -1980,28 +2087,39 @@ def fetch_rss_item():
             summary = entry.get("summary", "New ecosystem milestone reached.")
             clean = re.sub("<.*?>", "", summary)[:220] + "..."
             text = (
-                f"📰 **LIVE INDUSTRY UPDATE** 📰\n\n"
+                f"📰 **LIVE ECOSYSTEM UPDATE** 📰\n\n"
                 f"🔹 **{title}**\n\n"
                 f"💬 *{clean}*\n\n"
-                f"💡 *Context:* Global AI and power grid expansion drives demand for high-density compute at our Batam hub.\n\n"
+                f"💡 *Context:* Global AI and compute expansion continues to drive demand for high-density infrastructure.\n\n"
                 f"🔗 [Read Source]({link})\n"
-                f"🚀 [Explore Allocations]({NETLIFY_URL})"
+                f"🚀 [Explore AI Grid]({NETLIFY_URL})"
             )
             return {"type": "photo", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "text": text}
     except Exception as e:
         logger.warning(f"RSS fetch warning: {e}")
     return None
 
-async def get_channel_content():
-    # Weighted toward briefings + news, with regular testimony/ads/engagement
-    choice = random.choice([
-        "briefing", "briefing", "briefing", "briefing",
-        "dataset", "dataset", "dataset",
-        "rss",
-        "testimony", "testimony",
-        "ad",
-        "engagement",
-    ])
+# ─── TIME-OF-DAY CONTENT SELECTION ───
+def get_channel_content_for_hour(hour_utc: int):
+    """Different content type by time of day."""
+    if hour_utc == 6:
+        # Morning briefing — news-heavy
+        choice = random.choice(["dataset", "dataset", "rss", "briefing"])
+    elif hour_utc == 10:
+        # Midday — live ecosystem news
+        choice = random.choice(["rss", "rss", "dataset", "briefing"])
+    elif hour_utc == 14:
+        # Afternoon — frontier briefings
+        choice = random.choice(["briefing", "briefing", "dataset", "testimony"])
+    elif hour_utc == 18:
+        # Evening — engagement + testimony
+        choice = random.choice(["testimony", "engagement", "rss", "dataset"])
+    elif hour_utc == 22:
+        # Night — ads + allocator feedback
+        choice = random.choice(["ad", "testimony", "testimony", "briefing"])
+    else:
+        choice = random.choice(["dataset", "briefing", "rss", "testimony", "ad", "engagement"])
+
     if choice == "briefing":
         return get_frontier_briefing()
     if choice == "dataset":
@@ -2043,13 +2161,13 @@ async def send_restart_announcement():
     except Exception as e:
         logger.error(f"Startup announcement failed: {e}")
 
-async def scheduled_channel_broadcast():
+async def _post_content(content):
+    """Shared helper for all scheduled broadcasts."""
     if CHANNEL_STATE["scheduler_paused"]:
         logger.info("Scheduler paused — skipping broadcast.")
         return
     if not TELEGRAM_CHANNEL_ID:
         return
-    content = await get_channel_content()
     try:
         if content["type"] == "photo":
             msg = await safe_channel_send_photo(
@@ -2072,6 +2190,25 @@ async def scheduled_channel_broadcast():
     except Exception as e:
         logger.error(f"Scheduled broadcast failed: {e}")
 
+async def scheduled_morning_brief():
+    await _post_content(get_channel_content_for_hour(6))
+
+async def scheduled_midday_update():
+    await _post_content(get_channel_content_for_hour(10))
+
+async def scheduled_afternoon_update():
+    await _post_content(get_channel_content_for_hour(14))
+
+async def scheduled_evening_brief():
+    await _post_content(get_channel_content_for_hour(18))
+
+async def scheduled_night_update():
+    await _post_content(get_channel_content_for_hour(22))
+
+async def scheduled_channel_broadcast():
+    """Legacy — kept for compatibility. Fires evening slot."""
+    await scheduled_evening_brief()
+
 async def scheduled_weekly_roundup():
     if CHANNEL_STATE["scheduler_paused"]:
         return
@@ -2093,7 +2230,6 @@ async def scheduled_weekly_roundup():
     )
 
 async def scheduled_payout_reminder():
-    """Admin reminder on 1st of month to run payout cycle."""
     if not TELEGRAM_ADMIN_IDS:
         return
     try:
@@ -2116,7 +2252,6 @@ async def scheduled_payout_reminder():
         logger.error(f"Payout reminder failed: {e}")
 
 async def scheduled_monthly_statements():
-    """DM every active investor their monthly statement on the 1st."""
     try:
         investors = await list_investors(1000)
         for inv in investors:
@@ -2124,6 +2259,7 @@ async def scheduled_monthly_statements():
                 continue
             total = float(inv.total_allocated_usd or 0)
             monthly = total * 0.20
+            wallet_line = f"• **Payout Wallet:** `{inv.wallet_address[:8]}...{inv.wallet_address[-6:]}`" if inv.wallet_address else "• **Payout Wallet:** not set"
             try:
                 await telegram_app.bot.send_message(
                     chat_id=inv.telegram_user_id,
@@ -2134,7 +2270,7 @@ async def scheduled_monthly_statements():
                         f"• **Tier:** {inv.tier}\n"
                         f"• **Total Allocated:** ${total:,.2f}\n"
                         f"• **30-Day Payout:** ${monthly:,.2f}\n"
-                        f"• **Payout Wallet:** `{inv.wallet_address[:8]}...{inv.wallet_address[-6:]}`" if inv.wallet_address else f"• **Payout Wallet:** not set\n\n"
+                        f"{wallet_line}\n\n"
                         f"Thank you for being part of AI Grid Indonesia."
                     ),
                     parse_mode="Markdown"
@@ -2247,4 +2383,4 @@ telegram_app.add_handler(CallbackQueryHandler(account_settings_handler, pattern=
 telegram_app.add_handler(CallbackQueryHandler(back_to_profile_handler, pattern="^back_to_profile$"))
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))        
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
