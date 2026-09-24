@@ -595,7 +595,9 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• **Asset:** {crypto_info['label']}\n"
                 f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
                 f"📍 **Deposit Address:**\n`{pay_address}`\n\n"
-                f"⚠️ Send the exact amount above. Participation is recorded once confirmed on-chain."
+                f"⚠️ Send the exact amount above.\n\n"
+                f"📌 **After payment confirms**, you'll receive a message with a **Register Your Allocation** button.\n\n"
+                f"If you don't see it within 2 minutes, send `/register` in this chat."
             )
             keyboard = [
                 [InlineKeyboardButton("📱 QR Code", callback_data="show_qr")],
@@ -724,6 +726,81 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 **Investor Registration**\n\nChoose how you'd like to register:",
         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
     )
+
+async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let a user check their own payment and registration status."""
+    user_id = update.effective_user.id
+
+    investor = await get_investor_by_telegram(user_id)
+    pending = await get_pending_payments_for_user(user_id)
+
+    lines = ["📋 **Your Account Status**\n"]
+
+    if investor:
+        total = float(investor.total_allocated_usd or 0)
+        monthly = total * 0.20
+        lines.append(f"✅ **Registered**")
+        lines.append(f"• Investor ID: `{investor.investor_id}`")
+        lines.append(f"• Tier: {investor.tier}")
+        lines.append(f"• Total Allocated: ${total:,.2f}")
+        lines.append(f"• 30-Day Payout: ${monthly:,.2f}")
+        if investor.wallet_address:
+            lines.append(f"• Payout Wallet: `{investor.wallet_address[:8]}...{investor.wallet_address[-6:]}`")
+    else:
+        lines.append("❌ **Not registered yet**")
+
+    if pending:
+        lines.append(f"\n💳 **Confirmed payments awaiting registration:**")
+        for p in pending[:5]:
+            lines.append(f"• ${float(p.amount_usd):,.2f} ({p.pay_currency.upper()}) — `{p.order_id}`")
+        lines.append(f"\nUse `/register` to attach these to your profile.")
+    else:
+        lines.append(f"\n📭 No confirmed payments waiting.")
+
+    if not investor and not pending:
+        lines.append(f"\n💡 If you just paid, wait 1–2 minutes for blockchain confirmation.")
+        lines.append(f"Then send `/register` again.")
+        lines.append(f"\nQuestions? Email **{CONTACT_EMAIL}**")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let a user check their own payment and registration status."""
+    user_id = update.effective_user.id
+
+    # Check registration
+    investor = await get_investor_by_telegram(user_id)
+
+    # Check pending payments
+    pending = await get_pending_payments_for_user(user_id)
+
+    lines = ["📋 **Your Account Status**\n"]
+
+    if investor:
+        total = float(investor.total_allocated_usd or 0)
+        monthly = total * 0.20
+        lines.append(f"✅ **Registered**")
+        lines.append(f"• Investor ID: `{investor.investor_id}`")
+        lines.append(f"• Tier: {investor.tier}")
+        lines.append(f"• Total Allocated: ${total:,.2f}")
+        lines.append(f"• 30-Day Payout: ${monthly:,.2f}")
+    else:
+        lines.append("❌ **Not registered yet**")
+
+    if pending:
+        lines.append(f"\n💳 **Confirmed payments awaiting registration:**")
+        for p in pending[:5]:
+            lines.append(f"• ${float(p.amount_usd):,.2f} ({p.pay_currency.upper()}) — {p.order_id}")
+        lines.append(f"\nUse `/register` to attach these to your profile.")
+    else:
+        lines.append(f"\n📭 No confirmed payments waiting.")
+
+    if not investor and not pending:
+        lines.append(f"\n💡 If you just paid, wait 1–2 minutes for blockchain confirmation.")
+        lines.append(f"Then send `/register` again.")
+        lines.append(f"\nQuestions? Email **{CONTACT_EMAIL}**")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def register_contact_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2558,6 +2635,7 @@ telegram_app.add_handler(CommandHandler("vision", cmd_vision))
 telegram_app.add_handler(CommandHandler("neural", cmd_neural))
 telegram_app.add_handler(CommandHandler("risk", cmd_risk))
 telegram_app.add_handler(CommandHandler("status", cmd_status))
+telegram_app.add_handler(CommandHandler("mystatus", cmd_mystatus))
 telegram_app.add_handler(CommandHandler("post", cmd_post))
 telegram_app.add_handler(CommandHandler("postmedia", cmd_postmedia))
 telegram_app.add_handler(CommandHandler("quiet", cmd_quiet))
