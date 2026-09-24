@@ -314,7 +314,7 @@ FALLBACK_IMAGES = {
         "https://images.unsplash.com/photo-1551288049-bebda4e38f71?q=80&w=1600&auto=format&fit=crop",
     ],
     "rss": [
-        "https://images.unsplash.com/photo `-1518770660439-4636190"af475?q=80&w=daily1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
         "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
         "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
     ],
