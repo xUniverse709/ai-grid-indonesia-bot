@@ -299,8 +299,7 @@ FALLBACK_IMAGES = {
     "ad": [
         "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
         "https://images.unsplash.com/photo-1560472354-b33ff0c44a43?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1591405351990-4726e331f141?q |
-=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1591405351990-4726e331f141?q=80&w=1600&auto=format&fit=crop",
     ],
     "news": [
         "https://|images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
