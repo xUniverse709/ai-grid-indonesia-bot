@@ -70,7 +70,7 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 TELEGRAM_ADMIN_IDS_RAW = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 TELEGRAM_ADMIN_IDS = {int(x) for x in TELEGRAM_ADMIN_IDS_RAW.split(",") if x.strip().lstrip("-").isdigit()}
 
-NETLIFY_URL = os.environ.get("NETLIFY_URL", "https://ai-gr.netlify.app")
+NETLIFY_URL = os.environ.get("NETLIFY_URL", "https://ai-grid-indonesia.netlify.app")
 CONTACT_EMAIL = "contactaigrid.id@gmail.com"
 
 # ============================================================
