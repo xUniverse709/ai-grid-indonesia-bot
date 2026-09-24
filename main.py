@@ -2145,29 +2145,119 @@ def get_engagement():
     idx = _pick_unused(len(ENGAGEMENT_POOL), _used_engagement_indices)
     return {"type": "text", "text": ENGAGEMENT_POOL[idx]}
 
-def fetch_rss_item():
+def extract_rss_image(entry) -> str:
+    """Extract the best available image from an RSS entry."""
+    # Try media_content first (most common)
     try:
-        feed_url = random.choice(RSS_FEEDS)
-        parsed = feedparser.parse(feed_url)
-        if parsed.entries:
-            entry = random.choice(parsed.entries[:5])
-            title = entry.get("title", "Tech Update")
-            link = entry.get("link", NETLIFY_URL)
-            summary = entry.get("summary", "New ecosystem milestone reached.")
-            clean = re.sub("<.*?>", "", summary)[:220] + "..."
-            text = (
-                f"📰 **LIVE ECOSYSTEM UPDATE** 📰\n\n"
-                f"🔹 **{title}**\n\n"
-                f"💬 *{clean}*\n\n"
-                f"💡 *Context:* Global AI and compute expansion continues to drive demand for high-density infrastructure.\n\n"
-                f"🔗 [Read Source]({link})\n"
-                f"🚀 [Explore AI Grid]({NETLIFY_URL})"
-            )
-            return {"type": "photo", "image": "https://i.postimg.cc/3RWRjh88/IMG-8276.jpg", "text": text}
+        if hasattr(entry, "media_content") and entry.media_content:
+            return entry.media_content[0].get("url")
+    except Exception:
+        pass
+
+    # Try media_thumbnail
+    try:
+        if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+            return entry.media_thumbnail[0].get("url")
+    except Exception:
+        pass
+
+    # Try enclosures
+    try:
+        if hasattr(entry, "enclosures") and entry.enclosures:
+            for enc in entry.enclosures:
+                if enc.get("type", "").startswith("image"):
+                    return enc.get("href")
+    except Exception:
+        pass
+
+    # Try to scrape the first <img> from the summary HTML
+    try:
+        summary_html = entry.get("summary", "") + entry.get("description", "")
+        if summary_html:
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary_html)
+            if img_match:
+                return img_match.group(1)
+    except Exception:
+        pass
+
+    # Try og:image from the article page itself
+    try:
+        link = entry.get("link", "")
+        if link:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = httpx.get(link, headers=headers, timeout=8.0, follow_redirects=True)
+            if resp.status_code == 200:
+                og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
+                if og_match:
+                    return og_match.group(1)
+                tw_match = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
+                if tw_match:
+                    return tw_match.group(1)
+    except Exception as e:
+        logger.warning(f"Could not fetch og:image: {e}")
+
+    return None
+
+
+def pick_rss_image_from_content(title: str) -> str:
+    """Fallback image based on the news topic."""
+    t = title.lower()
+    if any(k in t for k in ["tesla", "model", "optimus", "cybertruck", "fsd", "battery"]):
+        return "https://images.unsplash.com/photo-1560958089-b8a1929cea89?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["spacex", "starship", "falcon", "rocket", "launch"]):
+        return "https://images.unsplash.com/photo-1517976487492-5750f3195933?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["starlink", "satellite"]):
+        return "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["neuralink", "brain", "neuro"]):
+        return "https://images.unsplash.com/photo-1559757148-5c350d0d3c56?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["grok", "xai", "ai", "artificial"]):
+        return "https://images.unsplash.com/photo-1677442136019-21780ecad995?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["chip", "gpu", "nvidia", "semiconductor"]):
+        return "https://images.unsplash.com/photo-1591405351990-4726e331f141?q=80&w=1600&auto=format&fit=crop"
+    return "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop"
+
+
+def fetch_rss_item():
+    """Fetch a live news item from one of the RSS feeds."""
+    try:
+        feed_list = RSS_FEEDS[:]
+        random.shuffle(feed_list)
+
+        for feed_url in feed_list[:5]:
+            try:
+                parsed = feedparser.parse(feed_url)
+                if not parsed.entries:
+                    continue
+
+                entry = random.choice(parsed.entries[:5])
+                title = entry.get("title", "Ecosystem Update")
+                link = entry.get("link", NETLIFY_URL)
+
+                raw_summary = entry.get("summary", "") or entry.get("description", "")
+                clean_summary = re.sub("<.*?>", "", raw_summary).strip()
+                clean_summary = clean_summary[:220] + ("..." if len(clean_summary) > 220 else "")
+
+                image_url = extract_rss_image(entry)
+                if not image_url:
+                    image_url = pick_rss_image_from_content(title)
+
+                text = (
+                    f"📰 **LIVE ECOSYSTEM UPDATE** 📰\n\n"
+                    f"🔹 **{title}**\n\n"
+                    f"💬 *{clean_summary}*\n\n"
+                    f"💡 *Context:* Global AI and compute expansion continues to drive demand for high-density infrastructure.\n\n"
+                    f"🔗 [Read Full Article]({link})\n"
+                    f"🚀 [Explore AI Grid Indonesia]({NETLIFY_URL})"
+                )
+
+                return {"type": "photo", "image": image_url, "text": text}
+            except Exception as inner_e:
+                logger.warning(f"RSS feed {feed_url} failed: {inner_e}")
+                continue
     except Exception as e:
         logger.warning(f"RSS fetch warning: {e}")
     return None
-
+    
 # ─── TIME-OF-DAY CONTENT SELECTION ───
 def get_channel_content_for_hour(hour_utc: int):
     """Different content type by time of day."""
