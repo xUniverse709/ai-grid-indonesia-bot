@@ -2197,6 +2197,14 @@ def _pick_unused(pool_length, used_list):
 def get_dataset_news_item():
     idx = _pick_unused(len(AI_GRID_NEWS_DATASET), _used_news_indices)
     item = AI_GRID_NEWS_DATASET[idx]
+    news_images = [
+        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
+    ]
+    image = random.choice(news_images)
     text = (
         f"🌟 **AI GRID INDONESIA — DAILY DIGEST** 🌟\n\n"
         f"📌 **{item['category']}**\n\n"
@@ -2205,8 +2213,8 @@ def get_dataset_news_item():
         f"🚀 [Explore Portal]({NETLIFY_URL})\n"
         f"🤖 [Bot Portal](https://t.me/aigridid_bot)"
     )
-    return {"type": "photo", "image": item["image"], "text": text}
-
+    return {"type": "photo", "image": image, "text": text}
+    
 def get_frontier_briefing():
     idx = _pick_unused(len(FRONTIER_COMPUTE_BRIEFINGS), _used_briefing_indices)
     text = FRONTIER_COMPUTE_BRIEFINGS[idx] + f"\n\n🚀 [Explore AI Grid Indonesia]({NETLIFY_URL})"
@@ -2239,8 +2247,15 @@ def get_testimony():
     
 def get_ad():
     idx = _pick_unused(len(ADS_POOL), _used_ad_indices)
-    return {"type": "photo", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "text": ADS_POOL[idx]}
-
+    ad_images = [
+        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
+    ]
+    image = random.choice(ad_images)
+    return {"type": "photo", "image": image, "text": ADS_POOL[idx]}
+    
 def get_engagement():
     idx = _pick_unused(len(ENGAGEMENT_POOL), _used_engagement_indices)
     return {"type": "text", "text": ENGAGEMENT_POOL[idx]}
