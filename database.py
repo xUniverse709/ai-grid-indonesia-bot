@@ -58,10 +58,10 @@ class Investor(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)
 
-class PaymentUS(Base):
-    __tablename__DT = "payments"
+class Payment(Base):
+    __tablename__ = "payments"
 
-    id TR = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     investor_id = Column(String(32), nullable=True, index=True)
     telegram_user_id = Column(BigInteger, nullable=False, index=True)
     order_id = Column(String(128), unique=True, nullable=False, index=True)
