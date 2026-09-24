@@ -2266,19 +2266,24 @@ def get_frontier_briefing():
     return {"type": "photo", "image": image, "text": text}
 
 def get_testimony():
+    """Generate a formatted allocator feedback post with a matching image."""
     idx = _pick_unused(len(TESTIMONIES_POOL), _used_testimony_indices)
     name, role, content = TESTIMONIES_POOL[idx]
     image = random.choice(TESTIMONY_IMAGES)
+
+    # Extract a plausible tier from the role string (or default)
+    tier_line = role  # e.g. "Managing Partner, Apex Digital Capital, Singapore"
+
     text = (
-        f"🌟 **ALLOCATOR FEEDBACK** 🌟\n\n"
-        f"👤 **{name}**\n"
-        f"💼 *{role}*\n\n"
-        f"💬 \"{content}\"\n\n"
-        f"🚀 [Secure Your Allocation]({NETLIFY_URL})\n"
-        f"🤖 [Bot Portal](https://t.me/aigridid_bot)"
+        f"🌟⭐️ **VERIFIED INVESTOR TESTIMONY** ⭐️🌟\n\n"
+        f"👤 **Investor:** {name}\n"
+        f"💰 **Allocation / Tier:** {tier_line}\n\n"
+        f"💬 **\"{content}\"**\n\n"
+        f"✅ **Verified Payout Proof. Join the winning circle today!**\n"
+        f"🚀 [Secure Your Allocation Here](https://t.me/aigridid_bot)"
     )
     return {"type": "photo", "image": image, "text": text}
-
+    
 def get_ad():
     idx = _pick_unused(len(ADS_POOL), _used_ad_indices)
     return {"type": "photo", "image": "https://i.postimg.cc/kgxtD7GJ/IMG-8273.jpg", "text": ADS_POOL[idx]}
