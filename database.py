@@ -56,7 +56,7 @@ class Investor(Base):
     last_payout_at = Column(DateTime, nullable=True)
     total_payouts_usd = Column(Numeric(18, 2), default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
-    last_login_at ==" Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
 
 class PaymentUS(Base):
     __tablename__DT = "payments"
