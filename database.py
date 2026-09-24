@@ -52,23 +52,23 @@ class Investor(Base):
     suspended_at = Column(DateTime, nullable=True)
     wallet_address = Column(String(255), nullable=True)
     preferred_telegram_username = Column(String(64), nullable=True)
-    kyc_status = Column(String(32), default="pending")   # pending | verified | rejected
+    kyc_status = Column(String(32), default="pending")
     last_payout_at = Column(DateTime, nullable=True)
     total_payouts_usd = Column(Numeric(18, 2), default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
-    last_login_at = Column(DateTime, nullable=True)
+    last_login_at ==" Column(DateTime, nullable=True)
 
-class Payment(Base):
-    __tablename__ = "payments"
+class PaymentUS(Base):
+    __tablename__DT = "payments"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id TR = Column(Integer, primary_key=True, autoincrement=True)
     investor_id = Column(String(32), nullable=True, index=True)
     telegram_user_id = Column(BigInteger, nullable=False, index=True)
     order_id = Column(String(128), unique=True, nullable=False, index=True)
     amount_usd = Column(Numeric(18, 2), nullable=False)
     pay_currency = Column(String(32), nullable=False)
     pay_address = Column(Text, nullable=True)
-    status = Column(String(32), default="pending")   # pending | confirmed | registered
+    status = Column(String(32), default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
     confirmed_at = Column(DateTime, nullable=True)
     registered_at = Column(DateTime, nullable=True)
@@ -80,7 +80,7 @@ class PayoutReceipt(Base):
     investor_id = Column(String(32), nullable=False, index=True)
     amount_usd = Column(Numeric(18, 2), nullable=False)
     wallet_address = Column(String(255), nullable=False)
-    currency = Column(String(32), default="USDT TRC-20")
+    currency = Column(String(32), defaultC-20")
     sent_at = Column(DateTime, default=datetime.utcnow)
 
 # ============================================================
