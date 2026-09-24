@@ -2217,40 +2217,91 @@ def pick_rss_image_from_content(title: str) -> str:
     return "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop"
 
 
+def detect_category(title: str, summary: str, source_name: str) -> str:
+    """Detect which company/category the news belongs to."""
+    text = (title + " " + summary + " " + source_name).lower()
+
+    if any(k in text for k in ["neuralink", "brain implant", "bci", "neuro"]):
+        return "🧠 Neuralink Update"
+    if any(k in text for k in ["spacex", "starship", "falcon 9", "falcon heavy", "starlink", "dragon capsule"]):
+        return "🚀 SpaceX Update"
+    if any(k in text for k in ["tesla", "model 3", "model y", "model s", "model x", "cybertruck", "optimus", "fsd", "autopilot", "supercharger"]):
+        return "⚡️ Tesla Update"
+    if any(k in text for k in ["grok", "xai", "x.ai"]):
+        return "🤖 xAI Update"
+    if any(k in text for k in ["the boring company", "boring co", "tunnel"]):
+        return "🚇 Boring Company Update"
+    if any(k in text for k in ["elon musk", "elon"]):
+        return "👤 Elon Musk Update"
+    if any(k in text for k in ["x.com", "twitter", "twitter/x"]):
+        return "🐦 X Update"
+    return "📰 xUniverse Update"
+
+
+def detect_hashtag(title: str, summary: str) -> str:
+    """Pick the right hashtag based on content."""
+    text = (title + " " + summary).lower()
+    if "neuralink" in text or "brain" in text:
+        return "#Neuralink"
+    if "spacex" in text or "starlink" in text or "starship" in text or "falcon" in text:
+        return "#SpaceX"
+    if "tesla" in text or "cybertruck" in text or "optimus" in text:
+        return "#Tesla"
+    if "grok" in text or "xai" in text:
+        return "#xAI"
+    if "boring" in text:
+        return "#BoringCompany"
+    return "#xUniverse"
+
+
 def fetch_rss_item():
-    """Fetch a live news item from one of the RSS feeds."""
+    """Fetch a live news item and format it like the original xUniverse bot."""
     try:
         feed_list = RSS_FEEDS[:]
         random.shuffle(feed_list)
 
-        for feed_url in feed_list[:5]:
+        for feed_url in feed_list[:6]:
             try:
                 parsed = feedparser.parse(feed_url)
                 if not parsed.entries:
                     continue
 
-                entry = random.choice(parsed.entries[:5])
-                title = entry.get("title", "Ecosystem Update")
+                entry = random.choice(parsed.entries[:8])
+                title = entry.get("title", "Ecosystem Update").strip()
                 link = entry.get("link", NETLIFY_URL)
 
+                # Source name
+                source_name = parsed.feed.get("title", "Industry Source").strip()
+
+                # Clean summary
                 raw_summary = entry.get("summary", "") or entry.get("description", "")
                 clean_summary = re.sub("<.*?>", "", raw_summary).strip()
-                clean_summary = clean_summary[:220] + ("..." if len(clean_summary) > 220 else "")
+                clean_summary = clean_summary[:250] + ("..." if len(clean_summary) > 250 else "")
 
+                # Get the image
                 image_url = extract_rss_image(entry)
                 if not image_url:
                     image_url = pick_rss_image_from_content(title)
 
+                # Detect category and hashtag
+                category_header = detect_category(title, clean_summary, source_name)
+                hashtag = detect_hashtag(title, clean_summary)
+
+                # Format the post (title-first, like the old bot)
                 text = (
-                    f"📰 **LIVE ECOSYSTEM UPDATE** 📰\n\n"
-                    f"🔹 **{title}**\n\n"
-                    f"💬 *{clean_summary}*\n\n"
-                    f"💡 *Context:* Global AI and compute expansion continues to drive demand for high-density infrastructure.\n\n"
-                    f"🔗 [Read Full Article]({link})\n"
-                    f"🚀 [Explore AI Grid Indonesia]({NETLIFY_URL})"
+                    f"{category_header}\n\n"
+                    f"**{title}**\n\n"
+                    f"🔗 [Read more]({link})\n\n"
+                    f"📅 {datetime.utcnow().strftime('%b %d, %Y • %H:%M UTC')}\n\n"
+                    f"#xUniverse {hashtag}"
                 )
 
-                return {"type": "photo", "image": image_url, "text": text}
+                return {
+                    "type": "photo",
+                    "image": image_url,
+                    "text": text,
+                    "source_link": link,
+                }
             except Exception as inner_e:
                 logger.warning(f"RSS feed {feed_url} failed: {inner_e}")
                 continue
@@ -2329,10 +2380,19 @@ async def _post_content(content):
         return
     try:
         if content["type"] == "photo":
-            msg = await safe_channel_send_photo(
-                photo_url=content["image"],
-                caption=content["text"]
-            )
+            # If the content has a source link, use it so tapping the image opens the article
+            source_link = content.get("source_link")
+            if source_link:
+                # Send as URL photo with caption containing the link
+                msg = await safe_channel_send_photo(
+                    photo_url=content["image"],
+                    caption=content["text"],
+                )
+            else:
+                msg = await safe_channel_send_photo(
+                    photo_url=content["image"],
+                    caption=content["text"],
+                )
         else:
             msg = await safe_channel_send_text(text=content["text"])
 
@@ -2348,7 +2408,7 @@ async def _post_content(content):
                 logger.info(f"Reaction set skipped: {e}")
     except Exception as e:
         logger.error(f"Scheduled broadcast failed: {e}")
-
+        
 async def scheduled_morning_brief():
     await _post_content(get_channel_content_for_hour(6))
 
