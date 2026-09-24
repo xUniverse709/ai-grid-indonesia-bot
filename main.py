@@ -288,95 +288,45 @@ def channel_mark_posted(content_text: str):
     CHANNEL_STATE["daily_count"] += 1
     CHANNEL_STATE["posted_hashes"][_content_hash(content_text)] = now
 
-# Topic-matched fallback images
-FALLBACK_IMAGES = {
-    "testimony": [
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
-    ],
-    "ad": [
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-    ],
-    "news": [
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?q=80&w=1600&auto=format&fit=crop",
-    ],
-    "briefing": [
-        "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-    ],
-    "rss": [
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
-    ],
-    "default": [
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-    ],
-}
-
-
-def pick_fallback_image(caption: str) -> list:
-    """Pick fallback images based on the caption content."""
-    c = caption.lower()
-    if "allocator feedback" in c or "testimony" in c or "💼" in c:
-        return FALLBACK_IMAGES["testimony"]
-    if "daily digest" in c or "ai grid indonesia" in c:
-        return FALLBACK_IMAGES["news"]
-    if "frontier compute" in c or "neural" in c:
-        return FALLBACK_IMAGES["briefing"]
-    if "ecosystem update" in c or "tesla update" in c or "spacex update" in c:
-        return FALLBACK_IMAGES["rss"]
-    if "need predictable cashflow" in c or "sub-2.5ms" in c or "institutional-grade" in c:
-        return FALLBACK_IMAGES["ad"]
-    return FALLBACK_IMAGES["default"]
-
 
 async def safe_channel_send_photo(photo_url: str, caption: str, reply_markup=None):
+    """Try to send with image. If image fails, send as text-only post."""
     can, reason = channel_can_post(caption)
     if not can:
         logger.info(f"Channel post skipped: {reason}")
         return None
 
-    # Topic-matched fallbacks — shuffled so they vary
-    fallbacks = pick_fallback_image(caption)[:]
-    random.shuffle(fallbacks)
-
-    attempts = [photo_url] + fallbacks
-
-    for i, url in enumerate(attempts):
-        for attempt in range(2):
+    # Try the image first
+    try:
+        msg = await telegram_app.bot.send_photo(
+            chat_id=TELEGRAM_CHANNEL_ID,
+            photo=photo_url,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        channel_mark_posted(caption)
+        return msg
+    except Exception as e:
+        err = str(e).lower()
+        if "429" in err or "too many requests" in err:
+            await asyncio.sleep(2)
             try:
                 msg = await telegram_app.bot.send_photo(
                     chat_id=TELEGRAM_CHANNEL_ID,
-                    photo=url,
+                    photo=photo_url,
                     caption=caption,
                     parse_mode="Markdown",
                     reply_markup=reply_markup
                 )
                 channel_mark_posted(caption)
-                if i > 0:
-                    logger.warning(f"Used topic-matched fallback image #{i} for post")
                 return msg
-            except Exception as e:
-                err = str(e).lower()
-                if "429" in err or "too many requests" in err:
-                    wait = 2 ** attempt
-                    logger.warning(f"Channel rate limit — retry in {wait}s")
-                    await asyncio.sleep(wait)
-                    continue
-                logger.warning(f"Photo send failed ({url[:50]}...): {e}")
-                break
-    logger.error("All photo attempts failed")
-    return None
+            except Exception:
+                pass
+        logger.warning(f"Photo send failed, falling back to text: {e}")
+
+    # Fallback: send as text-only (no image)
+    return await safe_channel_send_text(text=caption, reply_markup=reply_markup)
     
 async def safe_channel_send_text(text: str, reply_markup=None):
     can, reason = channel_can_post(text)
@@ -2264,18 +2214,23 @@ def get_frontier_briefing():
     return {"type": "photo", "image": image, "text": text}
 
 def get_testimony():
-    """Generate a formatted allocator feedback post with a matching image."""
+    """Generate a formatted allocator feedback post with profit/dashboard imagery."""
     idx = _pick_unused(len(TESTIMONIES_POOL), _used_testimony_indices)
     name, role, content = TESTIMONIES_POOL[idx]
-    image = random.choice(TESTIMONY_IMAGES)
 
-    # Extract a plausible tier from the role string (or default)
-    tier_line = role  # e.g. "Managing Partner, Apex Digital Capital, Singapore"
+    # Dashboard / profit / analytics style images — matches "yield" theme
+    dashboard_images = [
+        "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1551288049-bebda4e38f71?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1642790106117-e829e14a795f?q=80&w=1600&auto=format&fit=crop",
+        "https://images.unsplash.com/photo-1543286386-713bdd548da4?q=80&w=1600&auto=format&fit=crop",
+    ]
+    image = random.choice(dashboard_images)
 
     text = (
         f"🌟⭐️ **VERIFIED INVESTOR TESTIMONY** ⭐️🌟\n\n"
         f"👤 **Investor:** {name}\n"
-        f"💰 **Allocation / Tier:** {tier_line}\n\n"
+        f"💰 **Allocation / Tier:** {role}\n\n"
         f"💬 **\"{content}\"**\n\n"
         f"✅ **Verified Payout Proof. Join the winning circle today!**\n"
         f"🚀 [Secure Your Allocation Here](https://t.me/aigridid_bot)"
