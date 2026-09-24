@@ -80,7 +80,7 @@ class PayoutReceipt(Base):
     investor_id = Column(String(32), nullable=False, index=True)
     amount_usd = Column(Numeric(18, 2), nullable=False)
     wallet_address = Column(String(255), nullable=False)
-    currency = Column(String(32), defaultC-20")
+    currency = Column(String(32), default="USDT TRC-20")
     sent_at = Column(DateTime, default=datetime.utcnow)
 
 # ============================================================
