@@ -1291,6 +1291,75 @@ async def cmd_chanstat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def cmd_testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: manually trigger one scheduled post for testing."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔️ Not authorized.")
+        return
+    if not TELEGRAM_CHANNEL_ID:
+        await update.message.reply_text("❌ Channel ID not configured.")
+        return
+
+    force_type = context.args[0].lower() if context.args else None
+
+    try:
+        if force_type == "rss":
+            rss = fetch_rss_item()
+            if not rss:
+                await update.message.reply_text("❌ RSS fetch returned nothing. Try again.")
+                return
+            content = rss
+        elif force_type == "briefing":
+            content = get_frontier_briefing()
+        elif force_type == "news":
+            content = get_dataset_news_item()
+        elif force_type == "testimony":
+            content = get_testimony()
+        elif force_type == "ad":
+            content = get_ad()
+        elif force_type == "engagement":
+            content = get_engagement()
+        else:
+            hour_utc = datetime.utcnow().hour
+            content = get_channel_content_for_hour(hour_utc)
+
+        if content["type"] == "photo":
+            msg = await telegram_app.bot.send_photo(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                photo=content["image"],
+                caption=content["text"],
+                parse_mode="Markdown"
+            )
+        else:
+            msg = await telegram_app.bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=content["text"],
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+
+        if msg and "👍" in content["text"] and "👎" in content["text"]:
+            try:
+                from telegram import ReactionTypeEmoji
+                await telegram_app.bot.set_message_reaction(
+                    chat_id=TELEGRAM_CHANNEL_ID,
+                    message_id=msg.message_id,
+                    reaction=[ReactionTypeEmoji(emoji="👍"), ReactionTypeEmoji(emoji="👎")]
+                )
+            except Exception:
+                pass
+
+        channel_mark_posted(content["text"])
+
+        await update.message.reply_text(
+            f"✅ **Test post sent to channel.**\n\n"
+            f"• Type: {force_type or 'auto (time-based)'}\n"
+            f"• Content length: {len(content['text'])} chars"
+        )
+    except Exception as e:
+        logger.error(f"Test post failed: {e}")
+        await update.message.reply_text(f"❌ Test post failed: {e}")
+
 async def cmd_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Not authorized.")
@@ -2344,6 +2413,7 @@ telegram_app.add_handler(CommandHandler("postmedia", cmd_postmedia))
 telegram_app.add_handler(CommandHandler("quiet", cmd_quiet))
 telegram_app.add_handler(CommandHandler("resume", cmd_resume))
 telegram_app.add_handler(CommandHandler("chanstat", cmd_chanstat))
+telegram_app.add_handler(CommandHandler("testpost", cmd_testpost))
 telegram_app.add_handler(CommandHandler("lookup", cmd_lookup))
 telegram_app.add_handler(CommandHandler("suspend", cmd_suspend))
 telegram_app.add_handler(CommandHandler("unsuspend", cmd_unsuspend))
