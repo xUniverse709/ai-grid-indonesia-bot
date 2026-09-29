@@ -155,18 +155,19 @@ async def lifespan(app: FastAPI):
     logger.info("Telegram bot polling started.")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    # 5 scheduled posts per day + weekly roundup + admin reminders
+    # 6 scheduled posts per day + weekly roundup + admin reminders
     scheduler.add_job(scheduled_morning_brief, "cron", hour=6, minute=0, id="morning_brief")
-    scheduler.add_job(scheduled_midday_update, "cron", hour=10, minute=0, id="midday_update")
-    scheduler.add_job(scheduled_afternoon_update, "cron", hour=14, minute=0, id="afternoon_update")
-    scheduler.add_job(scheduled_evening_brief, "cron", hour=18, minute=0, id="evening_brief")
+    scheduler.add_job(scheduled_midday_update, "cron", hour=9, minute=0, id="midday_update")
+    scheduler.add_job(scheduled_afternoon_update, "cron", hour=12, minute=0, id="afternoon_update")
+    scheduler.add_job(scheduled_evening_brief, "cron", hour=15, minute=0, id="evening_brief")
+    scheduler.add_job(scheduled_evening_update_2, "cron", hour=18, minute=0, id="evening_update_2")
     scheduler.add_job(scheduled_night_update, "cron", hour=22, minute=0, id="night_update")
     scheduler.add_job(scheduled_weekly_roundup, "cron", day_of_week="sun", hour=18, minute=0, id="weekly_roundup")
     scheduler.add_job(scheduled_payout_reminder, "cron", day=1, hour=9, minute=0, id="payout_reminder")
     scheduler.add_job(scheduled_monthly_statements, "cron", day=1, hour=10, minute=0, id="monthly_statements")
     scheduler.start()
-    logger.info("Scheduler started — UTC timezone, 5 posts/day.")
-
+    logger.info("Scheduler started — UTC timezone, 6 posts/day.")
+    
     await send_restart_announcement()
 
     yield
@@ -2117,12 +2118,24 @@ TESTIMONIES_POOL = [
     ("Marcus Johnson", "Retired Data Center Executive, Dallas", "I've been in this industry for 30 years. The 50MW scale with liquid cooling at this density is a serious build."),
 ]
 
+TESTIMONY_TIERS = [
+    "AI Grid Indonesia Micro ($1,000)",
+    "AI Grid Indonesia Yield Tier ($2,000)",
+    "AI Grid Indonesia Compute Tier ($1,500)",
+    "AI Grid Indonesia Growth Pool ($5,000)",
+    "AI Grid Indonesia Syndicate ($5,000)",
+    "AI Grid Indonesia Enterprise ($8,000)",
+    "AI Grid Indonesia Institutional ($25,000)",
+    "AI Grid Indonesia Anchor ($100,000+)",
+]
+
 TESTIMONY_IMAGES = [
     "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=1600&auto=format&fit=crop",
     "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=1600&auto=format&fit=crop",
     "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop",
-    "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop",
-    "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?q=80&w=1600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?q=80&w=1600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1642790106117-e829e14a795f?q=80&w=1600&auto=format&fit=crop",
 ]
 
 ADS_POOL = [
@@ -2222,23 +2235,16 @@ def get_frontier_briefing():
     return {"type": "photo", "image": image, "text": text}
 
 def get_testimony():
-    """Generate a formatted allocator feedback post with profit/dashboard imagery."""
+    """Generate a formatted allocator feedback post with a matching tier and dashboard image."""
     idx = _pick_unused(len(TESTIMONIES_POOL), _used_testimony_indices)
     name, role, content = TESTIMONIES_POOL[idx]
-
-    # Dashboard / profit / analytics style images — matches "yield" theme
-    dashboard_images = [
-        "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1551288049-bebda4e38f71?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1642790106117-e829e14a795f?q=80&w=1600&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1543286386-713bdd548da4?q=80&w=1600&auto=format&fit=crop",
-    ]
-    image = random.choice(dashboard_images)
+    tier = random.choice(TESTIMONY_TIERS)
+    image = random.choice(TESTIMONY_IMAGES)
 
     text = (
         f"🌟⭐️ **VERIFIED INVESTOR TESTIMONY** ⭐️🌟\n\n"
         f"👤 **Investor:** {name}\n"
-        f"💰 **Allocation / Tier:** {role}\n\n"
+        f"💰 **Allocation / Tier:** {tier}\n\n"
         f"💬 **\"{content}\"**\n\n"
         f"✅ **Verified Payout Proof. Join the winning circle today!**\n"
         f"🚀 [Secure Your Allocation Here](https://t.me/aigridid_bot)"
@@ -2369,54 +2375,70 @@ def detect_hashtag(title: str, summary: str) -> str:
     return "#xUniverse"
 
 
+MUSK_KEYWORDS = [
+    "tesla", "spacex", "starlink", "starship", "falcon", "dragon capsule",
+    "grok", "xai", "neuralink", "elon", "musk", "optimus", "cybertruck",
+    "boring company", "model 3", "model y", "model s", "model x", "fsd",
+    "autopilot", "supercharger", "robotaxi", "dojo",
+]
+
+
+def _is_musk_related(title: str, summary: str) -> bool:
+    """Filter to only Musk-ecosystem content."""
+    text = (title + " " + summary).lower()
+    return any(k in text for k in MUSK_KEYWORDS)
+
+
 def fetch_rss_item():
-    """Fetch a live news item and format it like the original xUniverse bot."""
+    """Fetch a live Musk-ecosystem news item."""
     try:
         feed_list = RSS_FEEDS[:]
         random.shuffle(feed_list)
 
-        for feed_url in feed_list[:6]:
+        # Try up to 15 feeds until one returns a Musk-related article
+        for feed_url in feed_list[:15]:
             try:
                 parsed = feedparser.parse(feed_url)
                 if not parsed.entries:
                     continue
 
-                entry = random.choice(parsed.entries[:8])
-                title = entry.get("title", "Ecosystem Update").strip()
-                link = entry.get("link", NETLIFY_URL)
+                # Search recent entries for one that's Musk-related
+                candidates = parsed.entries[:15]
+                random.shuffle(candidates)
 
-                # Source name
-                source_name = parsed.feed.get("title", "Industry Source").strip()
+                for entry in candidates:
+                    title = entry.get("title", "").strip()
+                    raw_summary = entry.get("summary", "") or entry.get("description", "")
+                    clean_summary = re.sub("<.*?>", "", raw_summary).strip()
 
-                # Clean summary
-                raw_summary = entry.get("summary", "") or entry.get("description", "")
-                clean_summary = re.sub("<.*?>", "", raw_summary).strip()
-                clean_summary = clean_summary[:250] + ("..." if len(clean_summary) > 250 else "")
+                    if not _is_musk_related(title, clean_summary):
+                        continue
 
-                # Get the image
-                image_url = extract_rss_image(entry)
-                if not image_url:
-                    image_url = pick_rss_image_from_content(title)
+                    link = entry.get("link", NETLIFY_URL)
+                    source_name = parsed.feed.get("title", "Industry Source").strip()
 
-                # Detect category and hashtag
-                category_header = detect_category(title, clean_summary, source_name)
-                hashtag = detect_hashtag(title, clean_summary)
+                    clean_summary_trimmed = clean_summary[:250] + ("..." if len(clean_summary) > 250 else "")
 
-                # Format the post (title-first, like the old bot)
-                text = (
-                    f"{category_header}\n\n"
-                    f"**{title}**\n\n"
-                    f"🔗 [Read more]({link})\n\n"
-                    f"📅 {datetime.utcnow().strftime('%b %d, %Y • %H:%M UTC')}\n\n"
-                    f"#xUniverse {hashtag}"
-                )
+                    image_url = extract_rss_image(entry)
+                    if not image_url:
+                        image_url = pick_rss_image_from_content(title)
 
-                return {
-                    "type": "photo",
-                    "image": image_url,
-                    "text": text,
-                    "source_link": link,
-                }
+                    category_header = detect_category(title, clean_summary, source_name)
+                    hashtag = detect_hashtag(title, clean_summary)
+
+                    text = (
+                        f"{category_header}\n\n"
+                        f"**{title}**\n\n"
+                        f"🔗 [Read more]({link})\n\n"
+                        f"📅 {datetime.utcnow().strftime('%b %d, %Y • %H:%M UTC')}\n\n"
+                        f"#xUniverse {hashtag}"
+                    )
+                    return {
+                        "type": "photo",
+                        "image": image_url,
+                        "text": text,
+                        "source_link": link,
+                    }
             except Exception as inner_e:
                 logger.warning(f"RSS feed {feed_url} failed: {inner_e}")
                 continue
@@ -2527,18 +2549,26 @@ async def _post_content(content):
 async def scheduled_morning_brief():
     await _post_content(get_channel_content_for_hour(6))
 
+
 async def scheduled_midday_update():
-    await _post_content(get_channel_content_for_hour(10))
+    await _post_content(get_channel_content_for_hour(9))
+
 
 async def scheduled_afternoon_update():
-    await _post_content(get_channel_content_for_hour(14))
+    await _post_content(get_channel_content_for_hour(12))
+
 
 async def scheduled_evening_brief():
+    await _post_content(get_channel_content_for_hour(15))
+
+
+async def scheduled_evening_update_2():
     await _post_content(get_channel_content_for_hour(18))
+
 
 async def scheduled_night_update():
     await _post_content(get_channel_content_for_hour(22))
-
+    
 async def scheduled_channel_broadcast():
     """Legacy — kept for compatibility. Fires evening slot."""
     await scheduled_evening_brief()
