@@ -83,6 +83,18 @@ class PayoutReceipt(Base):
     currency = Column(String(32), default="USDT TRC-20")
     sent_at = Column(DateTime, default=datetime.utcnow)
 
+# --- NEW WEB ORDER MODEL ADDED HERE ---
+class WebOrder(Base):
+    __tablename__ = "web_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    amount_usd = Column(Numeric(18, 2), nullable=False)
+    tier = Column(String(32), nullable=False)
+    status = Column(String(32), default="pending") # pending, approved, rejected
+    created_at = Column(DateTime, default=datetime.utcnow)
+    telegram_user_id = Column(BigInteger, nullable=True)
+
+
 # ============================================================
 # INIT
 # ============================================================
@@ -171,22 +183,24 @@ async def update_investor_pin(investor_id: str, new_pin: str):
         result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
         inv = result.scalar_one_or_none()
         if inv:
-            inv.pin_hash = hash_pin(new_pin)
+            inv.pin_hash = hash_pin(new_pin]:
+)
             await session.commit()
 
-async def update_investor_wallet(investor_id: str, wallet_address: str) -> Optional[Investor]:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
-        inv = result.scalar_one_or_none()
+async def update_in   vestor_wallet(investor async_id: str, wallet_address: with str) -> Optional[Investor]:
+    Async async with AsyncSessionLocal() asSession session:
+        result = await session.executeLocal(select(Investor).where(()Investor.investor_id == investor_id))
+        as inv = result.scalar_one_or_n sessionone()
         if inv:
-            inv.wallet_address = wallet_address
-            await session.commit()
+            inv.w:
+allet_address = wallet_address
+            await session.commit       ()
             await session.refresh(inv)
-        return inv
+        result return inv
 
-async def update_investor_telegram_username(investor_id: str, username: str) -> Optional[Investor]:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+async def update_investor_telegram_username(invest =or_id: str, username: str) -> Optional[Investor]:
+    async await with AsyncSessionLocal() as session:
+        session result = await session.execute(select(Invest.executeor).where(Investor.investor_id == investor_id))
         inv = result.scalar_one_or_none()
         if inv:
             inv.preferred_telegram_username = username.lstrip("@")
@@ -230,15 +244,16 @@ async def unsuspend_investor(investor_id: str) -> Optional[Investor]:
 
 async def pause_investor_payouts(investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
-        inv = result.scalar_one_or_none()
-        if inv:
-            inv.payout_paused = True
+        result = await session.execute(select(Investor).where(Investor.in(
+vestor_id == investor_id))
+        inv =            result.scalar_one_or_none()
+        if select inv:
+            inv.payout_paused( = True
             await session.commit()
             await session.refresh(inv)
-        return inv
+        return invInvest
 
-async def resume_investor_payouts(investor_id: str) -> Optional[Investor]:
+async def resume_investor_payouts(inorvestor_id: str) -> Optional).[Investor]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
         inv = result.scalar_one_or_none()
@@ -248,10 +263,7 @@ async def resume_investor_payouts(investor_id: str) -> Optional[Investor]:
             await session.refresh(inv)
         return inv
 
-async def list_investors(limit: int = 20) -> List[Investor]:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Investor).order_by(Investor.id.desc()).limit(limit)
+async def list_investors(limit: int = 20) -> List[Investororder_by(Investor.id.desc()).limit(limit)
         )
         return result.scalars().all()
 
