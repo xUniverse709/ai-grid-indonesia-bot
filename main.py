@@ -36,12 +36,14 @@ from telegram.ext import (
 # ============================================================
 # DATABASE
 # ============================================================
+from sqlalchemy import select, func
 from database import (
+    AsyncSessionLocal, Investor, WebOrder, hash_pin, verify_pin,
     init_db, create_investor, get_investor_by_id, get_investor_by_telegram,
     get_investor_by_contact, update_investor_login, update_investor_pin,
     record_payment, confirm_payment, attach_payment_to_investor,
     get_pending_payments_for_user, get_all_payments_for_investor,
-    verify_pin, suspend_investor, unsuspend_investor,
+    suspend_investor, unsuspend_investor,
     list_investors, list_recent_payments,
     update_investor_wallet, update_investor_telegram_username,
     get_active_investors_with_payouts, mark_payout_sent,
