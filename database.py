@@ -1,3 +1,7 @@
+# ============================================================
+# AI GRID INDONESIA — database.py
+# ============================================================
+
 import os
 import logging
 from datetime import datetime
@@ -58,6 +62,7 @@ class Investor(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)
 
+
 class Payment(Base):
     __tablename__ = "payments"
 
@@ -73,6 +78,7 @@ class Payment(Base):
     confirmed_at = Column(DateTime, nullable=True)
     registered_at = Column(DateTime, nullable=True)
 
+
 class PayoutReceipt(Base):
     __tablename__ = "payout_receipts"
 
@@ -83,16 +89,18 @@ class PayoutReceipt(Base):
     currency = Column(String(32), default="USDT TRC-20")
     sent_at = Column(DateTime, default=datetime.utcnow)
 
-# --- NEW WEB ORDER MODEL ADDED HERE ---
+
 class WebOrder(Base):
     __tablename__ = "web_orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     amount_usd = Column(Numeric(18, 2), nullable=False)
     tier = Column(String(32), nullable=False)
-    status = Column(String(32), default="pending") # pending, approved, rejected
+    status = Column(String(32), default="pending")  # pending, approved, rejected
     created_at = Column(DateTime, default=datetime.utcnow)
     telegram_user_id = Column(BigInteger, nullable=True)
+    email = Column(String(255), nullable=True)
+    investor_id = Column(String(32), nullable=True)
 
 
 # ============================================================
@@ -103,17 +111,20 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database schema initialized.")
 
+
 # ============================================================
 # PIN HASHING
 # ============================================================
 def hash_pin(pin: str) -> str:
     return pbkdf2_sha256.hash(pin)
 
+
 def verify_pin(pin: str, pin_hash: str) -> bool:
     try:
         return pbkdf2_sha256.verify(pin, pin_hash)
     except Exception:
         return False
+
 
 # ============================================================
 # HELPERS — INVESTOR
@@ -122,6 +133,7 @@ async def _next_investor_id(session: AsyncSession) -> str:
     result = await session.execute(select(func.count()).select_from(Investor))
     count = result.scalar() or 0
     return f"AIG-2026-{count + 1:05d}"
+
 
 async def create_investor(
     telegram_user_id: int,
@@ -151,17 +163,24 @@ async def create_investor(
         await session.refresh(inv)
         return inv
 
+
 async def get_investor_by_id(investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         return result.scalar_one_or_none()
+
 
 async def get_investor_by_telegram(telegram_user_id: int) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Investor).where(Investor.telegram_user_id == telegram_user_id).order_by(Investor.id.desc())
+            select(Investor)
+            .where(Investor.telegram_user_id == telegram_user_id)
+            .order_by(Investor.id.desc())
         )
         return result.scalars().first()
+
 
 async def get_investor_by_contact(contact_value: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
@@ -170,37 +189,47 @@ async def get_investor_by_contact(contact_value: str) -> Optional[Investor]:
         )
         return result.scalars().first()
 
+
 async def update_investor_login(investor_id: str):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.last_login_at = datetime.utcnow()
             await session.commit()
 
+
 async def update_investor_pin(investor_id: str, new_pin: str):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
-            inv.pin_hash = hash_pin(new_pin]:
-)
+            inv.pin_hash = hash_pin(new_pin)
             await session.commit()
 
-async def update_in   vestor_wallet(investor async_id: str, wallet_address: with str) -> Optional[Investor]:
-    Async async with AsyncSessionLocal() asSession session:
-        result = await session.executeLocal(select(Investor).where(()Investor.investor_id == investor_id))
-        as inv = result.scalar_one_or_n sessionone()
-        if inv:
-            inv.w:
-allet_address = wallet_address
-            await session.commit       ()
-            await session.refresh(inv)
-        result return inv
 
-async def update_investor_telegram_username(invest =or_id: str, username: str) -> Optional[Investor]:
-    async await with AsyncSessionLocal() as session:
-        session result = await session.execute(select(Invest.executeor).where(Investor.investor_id == investor_id))
+async def update_investor_wallet(investor_id: str, wallet_address: str) -> Optional[Investor]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
+        inv = result.scalar_one_or_none()
+        if inv:
+            inv.wallet_address = wallet_address
+            await session.commit()
+            await session.refresh(inv)
+        return inv
+
+
+async def update_investor_telegram_username(investor_id: str, username: str) -> Optional[Investor]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.preferred_telegram_username = username.lstrip("@")
@@ -208,9 +237,12 @@ async def update_investor_telegram_username(invest =or_id: str, username: str) -
             await session.refresh(inv)
         return inv
 
+
 async def update_kyc_status(investor_id: str, status: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.kyc_status = status
@@ -218,9 +250,12 @@ async def update_kyc_status(investor_id: str, status: str) -> Optional[Investor]
             await session.refresh(inv)
         return inv
 
+
 async def suspend_investor(investor_id: str, reason: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.is_active = False
@@ -230,9 +265,12 @@ async def suspend_investor(investor_id: str, reason: str) -> Optional[Investor]:
             await session.refresh(inv)
         return inv
 
+
 async def unsuspend_investor(investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.is_active = True
@@ -242,20 +280,25 @@ async def unsuspend_investor(investor_id: str) -> Optional[Investor]:
             await session.refresh(inv)
         return inv
 
+
 async def pause_investor_payouts(investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.in(
-vestor_id == investor_id))
-        inv =            result.scalar_one_or_none()
-        if select inv:
-            inv.payout_paused( = True
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
+        inv = result.scalar_one_or_none()
+        if inv:
+            inv.payout_paused = True
             await session.commit()
             await session.refresh(inv)
-        return invInvest
+        return inv
 
-async def resume_investor_payouts(inorvestor_id: str) -> Optional).[Investor]:
+
+async def resume_investor_payouts(investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.payout_paused = False
@@ -263,9 +306,14 @@ async def resume_investor_payouts(inorvestor_id: str) -> Optional).[Investor]:
             await session.refresh(inv)
         return inv
 
-async def list_investors(limit: int = 20) -> List[Investororder_by(Investor.id.desc()).limit(limit)
+
+async def list_investors(limit: int = 20) -> List[Investor]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Investor).order_by(Investor.id.desc()).limit(limit)
         )
         return result.scalars().all()
+
 
 async def get_active_investors_with_payouts() -> List[Investor]:
     async with AsyncSessionLocal() as session:
@@ -278,9 +326,12 @@ async def get_active_investors_with_payouts() -> List[Investor]:
         )
         return result.scalars().all()
 
+
 async def mark_payout_sent(investor_id: str, amount_usd: float) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result.scalar_one_or_none()
         if inv:
             inv.last_payout_at = datetime.utcnow()
@@ -288,6 +339,7 @@ async def mark_payout_sent(investor_id: str, amount_usd: float) -> Optional[Inve
             await session.commit()
             await session.refresh(inv)
         return inv
+
 
 # ============================================================
 # HELPERS — PAYMENTS
@@ -300,7 +352,9 @@ async def record_payment(
     pay_address: str = None,
 ) -> Payment:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Payment).where(Payment.order_id == order_id))
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order_id)
+        )
         existing = result.scalar_one_or_none()
         if existing:
             return existing
@@ -317,9 +371,12 @@ async def record_payment(
         await session.refresh(p)
         return p
 
+
 async def confirm_payment(order_id: str) -> Optional[Payment]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Payment).where(Payment.order_id == order_id))
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order_id)
+        )
         p = result.scalar_one_or_none()
         if p:
             p.status = "confirmed"
@@ -328,9 +385,12 @@ async def confirm_payment(order_id: str) -> Optional[Payment]:
             await session.refresh(p)
         return p
 
+
 async def attach_payment_to_investor(order_id: str, investor_id: str) -> Optional[Investor]:
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Payment).where(Payment.order_id == order_id))
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order_id)
+        )
         p = result.scalar_one_or_none()
         if not p:
             return None
@@ -339,7 +399,9 @@ async def attach_payment_to_investor(order_id: str, investor_id: str) -> Optiona
         p.registered_at = datetime.utcnow()
         await session.commit()
 
-        result2 = await session.execute(select(Investor).where(Investor.investor_id == investor_id))
+        result2 = await session.execute(
+            select(Investor).where(Investor.investor_id == investor_id)
+        )
         inv = result2.scalar_one_or_none()
         if inv:
             inv.total_allocated_usd = (inv.total_allocated_usd or 0) + p.amount_usd
@@ -357,6 +419,7 @@ async def attach_payment_to_investor(order_id: str, investor_id: str) -> Optiona
             return inv
         return None
 
+
 async def get_pending_payments_for_user(telegram_user_id: int):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -367,6 +430,7 @@ async def get_pending_payments_for_user(telegram_user_id: int):
         )
         return result.scalars().all()
 
+
 async def get_all_payments_for_investor(investor_id: str):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -376,12 +440,14 @@ async def get_all_payments_for_investor(investor_id: str):
         )
         return result.scalars().all()
 
+
 async def list_recent_payments(limit: int = 20):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Payment).order_by(Payment.id.desc()).limit(limit)
         )
         return result.scalars().all()
+
 
 # ============================================================
 # HELPERS — PAYOUT RECEIPTS
@@ -403,6 +469,7 @@ async def create_payout_receipt(
         await session.commit()
         await session.refresh(r)
         return r
+
 
 async def list_payouts_for_investor(investor_id: str):
     async with AsyncSessionLocal() as session:
