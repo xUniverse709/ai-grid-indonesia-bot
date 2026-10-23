@@ -2748,5 +2748,101 @@ telegram_app.add_handler(CallbackQueryHandler(deploy_more_handler, pattern="^dep
 telegram_app.add_handler(CallbackQueryHandler(account_settings_handler, pattern="^account_settings$"))
 telegram_app.add_handler(CallbackQueryHandler(back_to_profile_handler, pattern="^back_to_profile$"))
 
+# ============================================================
+# WEBSITE API ENDPOINTS (For Netlify Frontend)
+# ============================================================
+import string
+from pydantic import BaseModel
+from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add CORS so Netlify can talk to Railway
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://ai-gr.netlify.app", "http://localhost:3000", "http://localhost:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class WebPaymentRequest(BaseModel):
+    amount: float
+    tier: str
+
+class WebLoginRequest(BaseModel):
+    investor_id: str
+    pin: str
+
+class WebAdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/web/register_payment")
+async def web_register_payment(data: WebPaymentRequest):
+    """Creates a real investor account from the website test checkout."""
+    # Generate unique ID
+    all_investors = await list_investors(10000)
+    count = len(all_investors) + 1
+    investor_id = f"AIG-2026-{count:05d}"
+    
+    # Generate 6-digit PIN
+    pin = "".join(random.choices(string.digits, k=6))
+    
+    # Save to PostgreSQL using your EXISTING database function
+    inv = await create_investor(
+        telegram_user_id=0, # 0 because they are a web user, not a Telegram user
+        contact_type="web",
+        contact_value="web_user",
+        pin=pin,
+        recovery_code="WEB-REG",
+    )
+    
+    # Immediately attach their payment tier
+    if inv:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Investor).where(Investor.investor_id == inv.investor_id))
+            db_inv = result.scalar_one_or_none()
+            if db_inv:
+                db_inv.total_allocated_usd = data.amount
+                db_inv.tier = data.tier
+                await session.commit()
+        
+        return {"investor_id": inv.investor_id, "pin": pin, "tier": data.tier, "total_allocated": data.amount, "status": "active"}
+    
+    raise HTTPException(status_code=500, detail="Database error")
+
+@app.post("/api/web/login")
+async def web_login(data: WebLoginRequest):
+    """Validates a real web user login."""
+    investor = await get_investor_by_id(data.investor_id)
+    if not investor or not verify_pin(data.pin, investor.pin_hash):
+        raise HTTPException(status_code=401, detail="Invalid Investor ID or PIN")
+    
+    if not investor.is_active:
+        raise HTTPException(status_code=403, detail="Account suspended")
+
+    return {
+        "investor_id": investor.investor_id, 
+        "tier": investor.tier, 
+        "total_allocated": float(investor.total_allocated_usd), 
+        "status": "active"
+    }
+
+@app.post("/api/web/admin_login")
+async def web_admin_login(data: WebAdminLoginRequest):
+    """Admin login for the website."""
+    admin_user = os.getenv("ADMIN_USERNAME", "admin")
+    admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
+
+    if data.username != admin_user or data.password != admin_pass:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"status": "success"}
+
+@app.get("/api/web/admin/investors")
+async def web_admin_investors():
+    """Returns list of all investors for the website admin panel."""
+    investors = await list_investors(100)
+    return [{"investor_id": i.investor_id, "tier": i.tier, "total_allocated": float(i.total_allocated_usd or 0), "status": "active" if i.is_active else "suspended"} for i in investors]
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
