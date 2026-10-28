@@ -64,10 +64,6 @@ logger = logging.getLogger(__name__)
 # ENVIRONMENT CONFIG
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
-NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
-NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1"
-
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 TELEGRAM_ADMIN_IDS_RAW = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 TELEGRAM_ADMIN_IDS = {int(x) for x in TELEGRAM_ADMIN_IDS_RAW.split(",") if x.strip().lstrip("-").isdigit()}
@@ -122,20 +118,6 @@ CHANNEL_STATE = {
 }
 
 # ============================================================
-# CRYPTO MAPPING
-# ============================================================
-CRYPTO_MAP = {
-    "usdttrc20": {"label": "USDT (TRC-20)", "ticker": "usdttrc20"},
-    "usdterc20": {"label": "USDT (ERC-20)", "ticker": "usdterc20"},
-    "usdcerc20": {"label": "USDC (ERC-20)", "ticker": "usdcerc20"},
-    "usdcsol": {"label": "USDC (Solana)", "ticker": "usdcsol"},
-    "btc": {"label": "Bitcoin (BTC)", "ticker": "btc"},
-    "eth": {"label": "Ethereum (ETH)", "ticker": "eth"},
-    "sol": {"label": "Solana (SOL)", "ticker": "sol"},
-    "bnb": {"label": "BNB (BEP-20)", "ticker": "bnbmainnet"}
-}
-
-# ============================================================
 # TELEGRAM APPLICATION
 # ============================================================
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -185,17 +167,6 @@ app = FastAPI(lifespan=lifespan)
 # ============================================================
 # SECURITY HELPERS
 # ============================================================
-def verify_nowpayments_signature(raw_body: bytes, signature_header: str) -> bool:
-    if not NOWPAYMENTS_IPN_SECRET:
-        logger.warning("NOWPAYMENTS_IPN_SECRET not configured.")
-        return False
-    if not signature_header:
-        return False
-    expected = hmac.new(
-        NOWPAYMENTS_IPN_SECRET.encode(), raw_body, hashlib.sha512
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature_header)
-
 def is_duplicate_order(order_id: str) -> bool:
     if not order_id:
         return True
@@ -206,34 +177,6 @@ def is_duplicate_order(order_id: str) -> bool:
         for _ in range(len(PROCESSED_ORDERS) - PROCESSED_ORDERS_MAX):
             PROCESSED_ORDERS.pop()
     return False
-
-async def nowpayments_request_with_retry(payload: dict, headers: dict, max_attempts: int = 3) -> dict:
-    last_error = None
-    for attempt in range(max_attempts):
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    f"{NOWPAYMENTS_API_URL}/payment",
-                    json=payload, headers=headers
-                )
-                if response.status_code == 200:
-                    return response.json()
-                if response.status_code in [429, 500, 502, 503, 504]:
-                    wait = 2 ** attempt
-                    logger.warning(f"NOWPayments {response.status_code} — retry in {wait}s")
-                    await asyncio.sleep(wait)
-                    last_error = f"HTTP {response.status_code}"
-                    continue
-                return response.json()
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
-            wait = 2 ** attempt
-            logger.warning(f"NOWPayments network error: {e} — retry in {wait}s")
-            await asyncio.sleep(wait)
-            last_error = str(e)
-        except Exception as e:
-            logger.error(f"NOWPayments exception: {e}")
-            raise
-    raise Exception(f"NOWPayments unavailable after {max_attempts} attempts. Last: {last_error}")
 
 def check_user_rate_limit(user_id: int, amount: float) -> tuple[bool, str]:
     now = time.time()
@@ -357,53 +300,6 @@ async def safe_channel_send_text(text: str, reply_markup=None):
             return None
     return None
 
-# ============================================================
-# WEBHOOK — NOWPayments
-# ============================================================
-@app.post("/webhook/nowpayments")
-async def nowpayments_webhook(request: Request):
-    raw_body = await request.body()
-    signature = request.headers.get("x-nowpayments-sig", "")
-
-    if not verify_nowpayments_signature(raw_body, signature):
-        logger.warning("Rejected webhook — invalid signature")
-        return Response(status_code=401)
-
-    try:
-        data = await request.json()
-    except Exception as e:
-        logger.error(f"Invalid JSON: {e}")
-        return Response(status_code=400)
-
-    payment_status = data.get("payment_status")
-    order_id = data.get("order_id")
-
-    if is_duplicate_order(order_id):
-        logger.info(f"Duplicate webhook: {order_id}")
-        return Response(status_code=200)
-
-    if payment_status in ["finished", "confirmed"] and order_id:
-        try:
-            telegram_user_id = int(order_id.split("_")[-1])
-            logger.info(f"Payment confirmed: user {telegram_user_id}")
-            await confirm_payment(order_id)
-            keyboard = [[InlineKeyboardButton("📝 Register Your Allocation", callback_data=f"reg_start_{order_id}")]]
-            await telegram_app.bot.send_message(
-                chat_id=telegram_user_id,
-                text=(
-                    "🎉 **Payment Confirmed!**\n"
-                    "───────────────────────────────\n"
-                    "Your transaction has been verified on the blockchain.\n\n"
-                    "To attach your allocation shares to your investor profile, "
-                    "please register now. You'll receive a unique **Investor ID** and **PIN**."
-                ),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Webhook processing error: {e}")
-    return Response(status_code=200)
-
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
@@ -496,9 +392,13 @@ async def allocate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def select_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    amount_str = query.data.split("_")[1]
-    context.user_data["invest_amount"] = float(amount_str)
-    await show_crypto_selection(query, context)
+    await query.edit_message_text(
+        "💳 **Manual Checkout**\n\n"
+        f"To complete your allocation, please visit our secure portal: {NETLIFY_URL}\n\n"
+        "Select your tier, complete the manual transfer, and our team will approve your account.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Portal", url=NETLIFY_URL)]]),
+    )
 
 async def prompt_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -522,166 +422,17 @@ async def receive_custom_amount(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(f"⚠️ Amounts above ${MAX_AMOUNT_USD:,} require direct contact: **{CONTACT_EMAIL}**", parse_mode="Markdown")
             return WAITING_CUSTOM_AMOUNT
         context.user_data["invest_amount"] = val
-        keyboard = [
-            [InlineKeyboardButton("USDT (TRC-20)", callback_data="pay_usdttrc20"), InlineKeyboardButton("USDT (ERC-20)", callback_data="pay_usdterc20")],
-            [InlineKeyboardButton("USDC (ERC-20)", callback_data="pay_usdcerc20"), InlineKeyboardButton("USDC (Solana)", callback_data="pay_usdcsol")],
-            [InlineKeyboardButton("Bitcoin (BTC)", callback_data="pay_btc"), InlineKeyboardButton("Ethereum (ETH)", callback_data="pay_eth")],
-            [InlineKeyboardButton("Solana (SOL)", callback_data="pay_sol"), InlineKeyboardButton("BNB (BEP-20)", callback_data="pay_bnb")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]
-        ]
         await update.message.reply_text(
-            f"✅ **Amount Set:** ${val:,.2f} USD\n\nSelect your cryptocurrency:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            "💳 **Manual Checkout**\n\n"
+            f"To complete your ${val:,.2f} allocation, please visit our secure portal: {NETLIFY_URL}\n\n"
+            "Select your tier, complete the manual transfer, and our team will approve your account.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Portal", url=NETLIFY_URL)]]),
         )
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("⚠️ Invalid number. Enter a valid value (e.g., 2500):")
         return WAITING_CUSTOM_AMOUNT
-
-async def show_crypto_selection(query, context: ContextTypes.DEFAULT_TYPE):
-    amount = context.user_data.get("invest_amount", 1000)
-    keyboard = [
-        [InlineKeyboardButton("USDT (TRC-20)", callback_data="pay_usdttrc20"), InlineKeyboardButton("USDT (ERC-20)", callback_data="pay_usdterc20")],
-        [InlineKeyboardButton("USDC (ERC-20)", callback_data="pay_usdcerc20"), InlineKeyboardButton("USDC (Solana)", callback_data="pay_usdcsol")],
-        [InlineKeyboardButton("Bitcoin (BTC)", callback_data="pay_btc"), InlineKeyboardButton("Ethereum (ETH)", callback_data="pay_eth")],
-        [InlineKeyboardButton("Solana (SOL)", callback_data="pay_sol"), InlineKeyboardButton("BNB (BEP-20)", callback_data="pay_bnb")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="allocate_menu")]
-    ]
-    await query.edit_message_text(
-        f"💵 **Selected Allocation:** ${amount:,.2f} USD\n\nSelect your cryptocurrency:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-
-async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pay_key = query.data.replace("pay_", "")
-    crypto_info = CRYPTO_MAP.get(pay_key, {"label": pay_key.upper(), "ticker": pay_key})
-    user_id = query.from_user.id
-    amount = context.user_data.get("invest_amount", 1000.0)
-
-    allowed, reason = check_user_rate_limit(user_id, amount)
-    if not allowed:
-        await query.edit_message_text(reason, parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="allocate_menu")]]))
-        return
-
-    await query.edit_message_text("🔄 **Connecting to blockchain gateway & generating payment invoice...**", parse_mode="Markdown")
-
-    headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
-    order_id = f"aigrid_{amount:.0f}_{user_id}"
-    payload = {
-        "price_amount": float(amount),
-        "price_currency": "usd",
-        "pay_currency": crypto_info["ticker"],
-        "order_id": order_id,
-        "order_description": f"AI Grid Indonesia Allocation (${amount:,.2f} USD)"
-    }
-
-    try:
-        data = await nowpayments_request_with_retry(payload, headers)
-        if "pay_address" in data:
-            pay_address = data["pay_address"]
-            pay_amount = data["pay_amount"]
-            pay_currency = data["pay_currency"].upper()
-
-            context.user_data["pay_address"] = pay_address
-            context.user_data["pay_amount"] = pay_amount
-            context.user_data["pay_currency"] = pay_currency
-            context.user_data["crypto_label"] = crypto_info["label"]
-
-            try:
-                await record_payment(
-                    telegram_user_id=user_id,
-                    order_id=order_id,
-                    amount_usd=amount,
-                    pay_currency=pay_currency,
-                    pay_address=pay_address,
-                )
-            except Exception as e:
-                logger.error(f"DB record failed: {e}")
-
-            record_invoice_attempt(user_id, amount)
-
-            invoice_text = (
-                f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
-                f"───────────────────────────────\n"
-                f"• **USD Value:** ${amount:,.2f} USD\n"
-                f"• **Asset:** {crypto_info['label']}\n"
-                f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
-                f"📍 **Deposit Address:**\n`{pay_address}`\n\n"
-                f"⚠️ Send the exact amount above.\n\n"
-                f"📌 **After payment confirms**, you'll receive a message with a **Register Your Allocation** button.\n\n"
-                f"If you don't see it within 2 minutes, send `/register` in this chat."
-            )
-            keyboard = [
-                [InlineKeyboardButton("📱 QR Code", callback_data="show_qr")],
-                [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
-                [InlineKeyboardButton("📩 Support", url="https://t.me/contactaigrid")]
-            ]
-            await query.edit_message_text(invoice_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        else:
-            logger.error(f"NOWPayments Error: {data}")
-            await query.edit_message_text("❌ **Gateway Timeout.** Try again or contact support.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Try Again", callback_data="allocate_menu")]]),
-                parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Invoice exception: {e}")
-        await query.edit_message_text("❌ Connection error. Please try again later.")
-
-async def show_qr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pay_address = context.user_data.get("pay_address", "N/A")
-    qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={pay_address}"
-    qr_caption = (
-        f"📱 **SCAN TO PAY**\n"
-        f"───────────────────────────────\n"
-        f"Scan with your crypto wallet to avoid typing errors.\n\n"
-        f"📍 **Deposit Address:**\n`{pay_address}`"
-    )
-    keyboard = [[InlineKeyboardButton("🔙 Back to Invoice", callback_data="back_to_invoice")]]
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    await context.bot.send_photo(
-        chat_id=query.from_user.id, photo=qr_code_url, caption=qr_caption,
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def back_to_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pay_address = context.user_data.get("pay_address", "N/A")
-    pay_amount = context.user_data.get("pay_amount", "N/A")
-    pay_currency = context.user_data.get("pay_currency", "BTC")
-    crypto_label = context.user_data.get("crypto_label", "Crypto")
-    amount = context.user_data.get("invest_amount", 1000.0)
-    invoice_text = (
-        f"✅ **OFFICIAL ALLOCATION INVOICE**\n"
-        f"───────────────────────────────\n"
-        f"• **USD Value:** ${amount:,.2f} USD\n"
-        f"• **Asset:** {crypto_label}\n"
-        f"• **Exact Amount to Send:** `{pay_amount}` **{pay_currency}**\n\n"
-        f"📍 **Deposit Address:**\n`{pay_address}`\n\n"
-        f"⚠️ Send the exact amount above."
-    )
-    keyboard = [
-        [InlineKeyboardButton("📱 QR Code", callback_data="show_qr")],
-        [InlineKeyboardButton("🔄 Main Menu", callback_data="main_menu")],
-        [InlineKeyboardButton("📩 Support", url="https://t.me/contactaigrid")]
-    ]
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    await context.bot.send_message(
-        chat_id=query.from_user.id, text=invoice_text,
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
 
 # ============================================================
 # REGISTRATION FLOW (with wallet + telegram collection)
@@ -748,43 +499,6 @@ async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Let a user check their own payment and registration status."""
     user_id = update.effective_user.id
 
-    investor = await get_investor_by_telegram(user_id)
-    pending = await get_pending_payments_for_user(user_id)
-
-    lines = ["📋 **Your Account Status**\n"]
-
-    if investor:
-        total = float(investor.total_allocated_usd or 0)
-        monthly = total * 0.20
-        lines.append(f"✅ **Registered**")
-        lines.append(f"• Investor ID: `{investor.investor_id}`")
-        lines.append(f"• Tier: {investor.tier}")
-        lines.append(f"• Total Allocated: ${total:,.2f}")
-        lines.append(f"• 30-Day Payout: ${monthly:,.2f}")
-        if investor.wallet_address:
-            lines.append(f"• Payout Wallet: `{investor.wallet_address[:8]}...{investor.wallet_address[-6:]}`")
-    else:
-        lines.append("❌ **Not registered yet**")
-
-    if pending:
-        lines.append(f"\n💳 **Confirmed payments awaiting registration:**")
-        for p in pending[:5]:
-            lines.append(f"• ${float(p.amount_usd):,.2f} ({p.pay_currency.upper()}) — `{p.order_id}`")
-        lines.append(f"\nUse `/register` to attach these to your profile.")
-    else:
-        lines.append(f"\n📭 No confirmed payments waiting.")
-
-    if not investor and not pending:
-        lines.append(f"\n💡 If you just paid, wait 1–2 minutes for blockchain confirmation.")
-        lines.append(f"Then send `/register` again.")
-        lines.append(f"\nQuestions? Email **{CONTACT_EMAIL}**")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Let a user check their own payment and registration status."""
-    user_id = update.effective_user.id
-
     # Check registration
     investor = await get_investor_by_telegram(user_id)
 
@@ -801,6 +515,8 @@ async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• Tier: {investor.tier}")
         lines.append(f"• Total Allocated: ${total:,.2f}")
         lines.append(f"• 30-Day Payout: ${monthly:,.2f}")
+        if investor.wallet_address:
+            lines.append(f"• Payout Wallet: `{investor.wallet_address[:8]}...{investor.wallet_address[-6:]}`")
     else:
         lines.append("❌ **Not registered yet**")
 
@@ -2161,30 +1877,25 @@ ENGAGEMENT_POOL = [
 
 # ─── RSS FEEDS (25+ Elon ecosystem sources) ───
 RSS_FEEDS = [
-    # Tesla
     "https://www.teslarati.com/feed/",
     "https://electrek.co/guides/tesla/feed/",
     "https://insideevs.com/rss/articles/all/",
     "https://cleantechnica.com/tag/tesla/feed/",
     "https://www.teslaoracle.com/feed/",
-    # SpaceX
     "https://www.nasaspaceflight.com/feed/",
     "https://spacenews.com/feed/",
     "https://www.space.com/feeds/all",
     "https://arstechnica.com/space/feed/",
     "https://www.universetoday.com/feed/",
-    # AI
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://venturebeat.com/category/ai/feed/",
     "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
     "https://www.wired.com/feed/tag/ai/latest/rss",
     "https://arstechnica.com/ai/feed/",
-    # Neuralink / Neuro
     "https://www.medicalnewstoday.com/rss/neurology.xml",
     "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml",
     "https://www.fiercebiotech.com/rss/xml",
     "https://www.statnews.com/feed/",
-    # Musk ecosystem general
     "https://www.teslarati.com/category/spacex/feed/",
     "https://www.thestreet.com/rss/news",
     "https://futurism.com/feed",
@@ -2237,7 +1948,6 @@ def get_frontier_briefing():
     return {"type": "photo", "image": image, "text": text}
 
 def get_testimony():
-    """Generate a formatted allocator feedback post with a matching tier and dashboard image."""
     idx = _pick_unused(len(TESTIMONIES_POOL), _used_testimony_indices)
     name, role, content = TESTIMONIES_POOL[idx]
     tier = random.choice(TESTIMONY_TIERS)
@@ -2269,41 +1979,26 @@ def get_engagement():
     return {"type": "text", "text": ENGAGEMENT_POOL[idx]}
 
 def extract_rss_image(entry) -> str:
-    """Extract the best available image from an RSS entry."""
-    # Try media_content first (most common)
     try:
         if hasattr(entry, "media_content") and entry.media_content:
             return entry.media_content[0].get("url")
-    except Exception:
-        pass
-
-    # Try media_thumbnail
+    except Exception: pass
     try:
         if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
             return entry.media_thumbnail[0].get("url")
-    except Exception:
-        pass
-
-    # Try enclosures
+    except Exception: pass
     try:
         if hasattr(entry, "enclosures") and entry.enclosures:
             for enc in entry.enclosures:
                 if enc.get("type", "").startswith("image"):
                     return enc.get("href")
-    except Exception:
-        pass
-
-    # Try to scrape the first <img> from the summary HTML
+    except Exception: pass
     try:
         summary_html = entry.get("summary", "") + entry.get("description", "")
         if summary_html:
             img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary_html)
-            if img_match:
-                return img_match.group(1)
-    except Exception:
-        pass
-
-    # Try og:image from the article page itself
+            if img_match: return img_match.group(1)
+    except Exception: pass
     try:
         link = entry.get("link", "")
         if link:
@@ -2311,71 +2006,41 @@ def extract_rss_image(entry) -> str:
             resp = httpx.get(link, headers=headers, timeout=8.0, follow_redirects=True)
             if resp.status_code == 200:
                 og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
-                if og_match:
-                    return og_match.group(1)
+                if og_match: return og_match.group(1)
                 tw_match = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
-                if tw_match:
-                    return tw_match.group(1)
-    except Exception as e:
-        logger.warning(f"Could not fetch og:image: {e}")
-
+                if tw_match: return tw_match.group(1)
+    except Exception as e: logger.warning(f"Could not fetch og:image: {e}")
     return None
 
-
 def pick_rss_image_from_content(title: str) -> str:
-    """Fallback image based on the news topic."""
     t = title.lower()
-    if any(k in t for k in ["tesla", "model", "optimus", "cybertruck", "fsd", "battery"]):
-        return "https://images.unsplash.com/photo-1560958089-b8a1929cea89?q=80&w=1600&auto=format&fit=crop"
-    if any(k in t for k in ["spacex", "starship", "falcon", "rocket", "launch"]):
-        return "https://images.unsplash.com/photo-1517976487492-5750f3195933?q=80&w=1600&auto=format&fit=crop"
-    if any(k in t for k in ["starlink", "satellite"]):
-        return "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop"
-    if any(k in t for k in ["neuralink", "brain", "neuro"]):
-        return "https://images.unsplash.com/photo-1559757148-5c350d0d3c56?q=80&w=1600&auto=format&fit=crop"
-    if any(k in t for k in ["grok", "xai", "ai", "artificial"]):
-        return "https://images.unsplash.com/photo-1677442136019-21780ecad995?q=80&w=1600&auto=format&fit=crop"
-    if any(k in t for k in ["chip", "gpu", "nvidia", "semiconductor"]):
-        return "https://images.unsplash.com/photo-1591405351990-4726e331f141?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["tesla", "model", "optimus", "cybertruck", "fsd", "battery"]): return "https://images.unsplash.com/photo-1560958089-b8a1929cea89?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["spacex", "starship", "falcon", "rocket", "launch"]): return "https://images.unsplash.com/photo-1517976487492-5750f3195933?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["starlink", "satellite"]): return "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["neuralink", "brain", "neuro"]): return "https://images.unsplash.com/photo-1559757148-5c350d0d3c56?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["grok", "xai", "ai", "artificial"]): return "https://images.unsplash.com/photo-1677442136019-21780ecad995?q=80&w=1600&auto=format&fit=crop"
+    if any(k in t for k in ["chip", "gpu", "nvidia", "semiconductor"]): return "https://images.unsplash.com/photo-1591405351990-4726e331f141?q=80&w=1600&auto=format&fit=crop"
     return "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1600&auto=format&fit=crop"
 
-
 def detect_category(title: str, summary: str, source_name: str) -> str:
-    """Detect which company/category the news belongs to."""
     text = (title + " " + summary + " " + source_name).lower()
-
-    if any(k in text for k in ["neuralink", "brain implant", "bci", "neuro"]):
-        return "🧠 Neuralink Update"
-    if any(k in text for k in ["spacex", "starship", "falcon 9", "falcon heavy", "starlink", "dragon capsule"]):
-        return "🚀 SpaceX Update"
-    if any(k in text for k in ["tesla", "model 3", "model y", "model s", "model x", "cybertruck", "optimus", "fsd", "autopilot", "supercharger"]):
-        return "⚡️ Tesla Update"
-    if any(k in text for k in ["grok", "xai", "x.ai"]):
-        return "🤖 xAI Update"
-    if any(k in text for k in ["the boring company", "boring co", "tunnel"]):
-        return "🚇 Boring Company Update"
-    if any(k in text for k in ["elon musk", "elon"]):
-        return "👤 Elon Musk Update"
-    if any(k in text for k in ["x.com", "twitter", "twitter/x"]):
-        return "🐦 X Update"
+    if any(k in text for k in ["neuralink", "brain implant", "bci", "neuro"]): return "🧠 Neuralink Update"
+    if any(k in text for k in ["spacex", "starship", "falcon 9", "falcon heavy", "starlink", "dragon capsule"]): return "🚀 SpaceX Update"
+    if any(k in text for k in ["tesla", "model 3", "model y", "model s", "model x", "cybertruck", "optimus", "fsd", "autopilot", "supercharger"]): return "⚡️ Tesla Update"
+    if any(k in text for k in ["grok", "xai", "x.ai"]): return "🤖 xAI Update"
+    if any(k in text for k in ["the boring company", "boring co", "tunnel"]): return "🚇 Boring Company Update"
+    if any(k in text for k in ["elon musk", "elon"]): return "👤 Elon Musk Update"
+    if any(k in text for k in ["x.com", "twitter", "twitter/x"]): return "🐦 X Update"
     return "📰 xUniverse Update"
 
-
 def detect_hashtag(title: str, summary: str) -> str:
-    """Pick the right hashtag based on content."""
     text = (title + " " + summary).lower()
-    if "neuralink" in text or "brain" in text:
-        return "#Neuralink"
-    if "spacex" in text or "starlink" in text or "starship" in text or "falcon" in text:
-        return "#SpaceX"
-    if "tesla" in text or "cybertruck" in text or "optimus" in text:
-        return "#Tesla"
-    if "grok" in text or "xai" in text:
-        return "#xAI"
-    if "boring" in text:
-        return "#BoringCompany"
+    if "neuralink" in text or "brain" in text: return "#Neuralink"
+    if "spacex" in text or "starlink" in text or "starship" in text or "falcon" in text: return "#SpaceX"
+    if "tesla" in text or "cybertruck" in text or "optimus" in text: return "#Tesla"
+    if "grok" in text or "xai" in text: return "#xAI"
+    if "boring" in text: return "#BoringCompany"
     return "#xUniverse"
-
 
 MUSK_KEYWORDS = [
     "tesla", "spacex", "starlink", "starship", "falcon", "dragon capsule",
@@ -2384,50 +2049,31 @@ MUSK_KEYWORDS = [
     "autopilot", "supercharger", "robotaxi", "dojo",
 ]
 
-
 def _is_musk_related(title: str, summary: str) -> bool:
-    """Filter to only Musk-ecosystem content."""
     text = (title + " " + summary).lower()
     return any(k in text for k in MUSK_KEYWORDS)
 
-
 def fetch_rss_item():
-    """Fetch a live Musk-ecosystem news item."""
     try:
         feed_list = RSS_FEEDS[:]
         random.shuffle(feed_list)
-
-        # Try up to 15 feeds until one returns a Musk-related article
         for feed_url in feed_list[:15]:
             try:
                 parsed = feedparser.parse(feed_url)
-                if not parsed.entries:
-                    continue
-
-                # Search recent entries for one that's Musk-related
+                if not parsed.entries: continue
                 candidates = parsed.entries[:15]
                 random.shuffle(candidates)
-
                 for entry in candidates:
                     title = entry.get("title", "").strip()
                     raw_summary = entry.get("summary", "") or entry.get("description", "")
                     clean_summary = re.sub("<.*?>", "", raw_summary).strip()
-
-                    if not _is_musk_related(title, clean_summary):
-                        continue
-
+                    if not _is_musk_related(title, clean_summary): continue
                     link = entry.get("link", NETLIFY_URL)
                     source_name = parsed.feed.get("title", "Industry Source").strip()
-
-                    clean_summary_trimmed = clean_summary[:250] + ("..." if len(clean_summary) > 250 else "")
-
                     image_url = extract_rss_image(entry)
-                    if not image_url:
-                        image_url = pick_rss_image_from_content(title)
-
+                    if not image_url: image_url = pick_rss_image_from_content(title)
                     category_header = detect_category(title, clean_summary, source_name)
                     hashtag = detect_hashtag(title, clean_summary)
-
                     text = (
                         f"{category_header}\n\n"
                         f"**{title}**\n\n"
@@ -2435,12 +2081,7 @@ def fetch_rss_item():
                         f"📅 {datetime.utcnow().strftime('%b %d, %Y • %H:%M UTC')}\n\n"
                         f"#xUniverse {hashtag}"
                     )
-                    return {
-                        "type": "photo",
-                        "image": image_url,
-                        "text": text,
-                        "source_link": link,
-                    }
+                    return {"type": "photo", "image": image_url, "text": text, "source_link": link}
             except Exception as inner_e:
                 logger.warning(f"RSS feed {feed_url} failed: {inner_e}")
                 continue
@@ -2448,48 +2089,28 @@ def fetch_rss_item():
         logger.warning(f"RSS fetch warning: {e}")
     return None
     
-# ─── TIME-OF-DAY CONTENT SELECTION ───
 def get_channel_content_for_hour(hour_utc: int):
-    """Different content type by time of day."""
-    if hour_utc == 6:
-        # Morning briefing — news-heavy
-        choice = random.choice(["dataset", "dataset", "rss", "briefing"])
-    elif hour_utc == 10:
-        # Midday — live ecosystem news
-        choice = random.choice(["rss", "rss", "dataset", "briefing"])
-    elif hour_utc == 14:
-        # Afternoon — frontier briefings
-        choice = random.choice(["briefing", "briefing", "dataset", "testimony"])
-    elif hour_utc == 18:
-        # Evening — engagement + testimony
-        choice = random.choice(["testimony", "engagement", "rss", "dataset"])
-    elif hour_utc == 22:
-        # Night — ads + allocator feedback
-        choice = random.choice(["ad", "testimony", "testimony", "briefing"])
-    else:
-        choice = random.choice(["dataset", "briefing", "rss", "testimony", "ad", "engagement"])
-
-    if choice == "briefing":
-        return get_frontier_briefing()
-    if choice == "dataset":
-        return get_dataset_news_item()
+    if hour_utc == 6: choice = random.choice(["dataset", "dataset", "rss", "briefing"])
+    elif hour_utc == 10: choice = random.choice(["rss", "rss", "dataset", "briefing"])
+    elif hour_utc == 14: choice = random.choice(["briefing", "briefing", "dataset", "testimony"])
+    elif hour_utc == 18: choice = random.choice(["testimony", "engagement", "rss", "dataset"])
+    elif hour_utc == 22: choice = random.choice(["ad", "testimony", "testimony", "briefing"])
+    else: choice = random.choice(["dataset", "briefing", "rss", "testimony", "ad", "engagement"])
+    if choice == "briefing": return get_frontier_briefing()
+    if choice == "dataset": return get_dataset_news_item()
     if choice == "rss":
         rss = fetch_rss_item()
-        if rss:
-            return rss
+        if rss: return rss
         return get_dataset_news_item()
-    if choice == "testimony":
-        return get_testimony()
-    if choice == "ad":
-        return get_ad()
+    if choice == "testimony": return get_testimony()
+    if choice == "ad": return get_ad()
     return get_engagement()
 
 # ============================================================
 # SCHEDULED FUNCTIONS
 # ============================================================
 async def send_restart_announcement():
-    if not TELEGRAM_CHANNEL_ID:
-        return
+    if not TELEGRAM_CHANNEL_ID: return
     text = (
         "🚀 AI GRID INDONESIA | Back Online\n\n"
         "Our unified bot is now live — investor portal, channel updates, and frontier compute intelligence in one place.\n\n"
@@ -2507,34 +2128,22 @@ async def send_restart_announcement():
             caption=text
         )
         logger.info("Startup announcement sent.")
-    except Exception as e:
-        logger.error(f"Startup announcement failed: {e}")
+    except Exception as e: logger.error(f"Startup announcement failed: {e}")
 
 async def _post_content(content):
-    """Shared helper for all scheduled broadcasts."""
     if CHANNEL_STATE["scheduler_paused"]:
         logger.info("Scheduler paused — skipping broadcast.")
         return
-    if not TELEGRAM_CHANNEL_ID:
-        return
+    if not TELEGRAM_CHANNEL_ID: return
     try:
         if content["type"] == "photo":
-            # If the content has a source link, use it so tapping the image opens the article
             source_link = content.get("source_link")
             if source_link:
-                # Send as URL photo with caption containing the link
-                msg = await safe_channel_send_photo(
-                    photo_url=content["image"],
-                    caption=content["text"],
-                )
+                msg = await safe_channel_send_photo(photo_url=content["image"], caption=content["text"])
             else:
-                msg = await safe_channel_send_photo(
-                    photo_url=content["image"],
-                    caption=content["text"],
-                )
+                msg = await safe_channel_send_photo(photo_url=content["image"], caption=content["text"])
         else:
             msg = await safe_channel_send_text(text=content["text"])
-
         if msg and "👍" in content["text"] and "👎" in content["text"]:
             try:
                 from telegram import ReactionTypeEmoji
@@ -2543,43 +2152,20 @@ async def _post_content(content):
                     message_id=msg.message_id,
                     reaction=[ReactionTypeEmoji(emoji="👍"), ReactionTypeEmoji(emoji="👎")]
                 )
-            except Exception as e:
-                logger.info(f"Reaction set skipped: {e}")
-    except Exception as e:
-        logger.error(f"Scheduled broadcast failed: {e}")
+            except Exception as e: logger.info(f"Reaction set skipped: {e}")
+    except Exception as e: logger.error(f"Scheduled broadcast failed: {e}")
         
-async def scheduled_morning_brief():
-    await _post_content(get_channel_content_for_hour(6))
-
-
-async def scheduled_midday_update():
-    await _post_content(get_channel_content_for_hour(9))
-
-
-async def scheduled_afternoon_update():
-    await _post_content(get_channel_content_for_hour(12))
-
-
-async def scheduled_evening_brief():
-    await _post_content(get_channel_content_for_hour(15))
-
-
-async def scheduled_evening_update_2():
-    await _post_content(get_channel_content_for_hour(18))
-
-
-async def scheduled_night_update():
-    await _post_content(get_channel_content_for_hour(22))
-    
-async def scheduled_channel_broadcast():
-    """Legacy — kept for compatibility. Fires evening slot."""
-    await scheduled_evening_brief()
+async def scheduled_morning_brief(): await _post_content(get_channel_content_for_hour(6))
+async def scheduled_midday_update(): await _post_content(get_channel_content_for_hour(9))
+async def scheduled_afternoon_update(): await _post_content(get_channel_content_for_hour(12))
+async def scheduled_evening_brief(): await _post_content(get_channel_content_for_hour(15))
+async def scheduled_evening_update_2(): await _post_content(get_channel_content_for_hour(18))
+async def scheduled_night_update(): await _post_content(get_channel_content_for_hour(22))
+async def scheduled_channel_broadcast(): await scheduled_evening_brief()
 
 async def scheduled_weekly_roundup():
-    if CHANNEL_STATE["scheduler_paused"]:
-        return
-    if not TELEGRAM_CHANNEL_ID:
-        return
+    if CHANNEL_STATE["scheduler_paused"]: return
+    if not TELEGRAM_CHANNEL_ID: return
     text = (
         "📊 **WEEKLY ROUNDUP — AI GRID INDONESIA** 📊\n\n"
         "• Batam Phase-1 development progressing on schedule\n"
@@ -2590,39 +2176,30 @@ async def scheduled_weekly_roundup():
         f"🚀 [Explore Portal]({NETLIFY_URL})\n"
         f"🤖 [Bot Portal](https://t.me/aigridid_bot)"
     )
-    await safe_channel_send_photo(
-        photo_url="https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg",
-        caption=text
-    )
+    await safe_channel_send_photo(photo_url="https://i.postimg.cc/jdwxkr1w/IMG-8244.jpg", caption=text)
 
 async def scheduled_payout_reminder():
-    if not TELEGRAM_ADMIN_IDS:
-        return
+    if not TELEGRAM_ADMIN_IDS: return
     try:
         investors = await get_active_investors_with_payouts()
         total = sum(float(i.total_allocated_usd or 0) * 0.20 for i in investors)
         text = (
-            f"💰 **Payout Cycle Reminder**\n"
-            f"───────────────────────────────\n"
+            f"💰 **Payout Cycle Reminder**\n───────────────────────────────\n"
             f"• Active investors with wallets: {len(investors)}\n"
             f"• Total pending this cycle: ${total:,.2f}\n\n"
             f"Run `/payoutlist` to see the full breakdown.\n"
             f"Use `/markpaid <INVESTOR_ID>` after each payout is sent."
         )
         for admin_id in TELEGRAM_ADMIN_IDS:
-            try:
-                await telegram_app.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Could not DM admin {admin_id}: {e}")
-    except Exception as e:
-        logger.error(f"Payout reminder failed: {e}")
+            try: await telegram_app.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
+            except Exception as e: logger.warning(f"Could not DM admin {admin_id}: {e}")
+    except Exception as e: logger.error(f"Payout reminder failed: {e}")
 
 async def scheduled_monthly_statements():
     try:
         investors = await list_investors(1000)
         for inv in investors:
-            if not inv.is_active:
-                continue
+            if not inv.is_active: continue
             total = float(inv.total_allocated_usd or 0)
             monthly = total * 0.20
             wallet_line = f"• **Payout Wallet:** `{inv.wallet_address[:8]}...{inv.wallet_address[-6:]}`" if inv.wallet_address else "• **Payout Wallet:** not set"
@@ -2630,21 +2207,13 @@ async def scheduled_monthly_statements():
                 await telegram_app.bot.send_message(
                     chat_id=inv.telegram_user_id,
                     text=(
-                        f"📊 **Monthly Statement — {datetime.utcnow().strftime('%B %Y')}**\n"
-                        f"───────────────────────────────\n"
-                        f"• **Investor ID:** `{inv.investor_id}`\n"
-                        f"• **Tier:** {inv.tier}\n"
-                        f"• **Total Allocated:** ${total:,.2f}\n"
-                        f"• **30-Day Payout:** ${monthly:,.2f}\n"
-                        f"{wallet_line}\n\n"
-                        f"Thank you for being part of AI Grid Indonesia."
-                    ),
-                    parse_mode="Markdown"
+                        f"📊 **Monthly Statement — {datetime.utcnow().strftime('%B %Y')}**\n───────────────────────────────\n"
+                        f"• **Investor ID:** `{inv.investor_id}`\n• **Tier:** {inv.tier}\n• **Total Allocated:** ${total:,.2f}\n"
+                        f"• **30-Day Payout:** ${monthly:,.2f}\n{wallet_line}\n\nThank you for being part of AI Grid Indonesia."
+                    ), parse_mode="Markdown"
                 )
-            except Exception as e:
-                logger.warning(f"Could not send statement to {inv.investor_id}: {e}")
-    except Exception as e:
-        logger.error(f"Monthly statements failed: {e}")
+            except Exception as e: logger.warning(f"Could not send statement to {inv.investor_id}: {e}")
+    except Exception as e: logger.error(f"Monthly statements failed: {e}")
 
 # ============================================================
 # HANDLER REGISTRATION
@@ -2654,51 +2223,36 @@ custom_amount_handler = ConversationHandler(
     states={WAITING_CUSTOM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_amount)]},
     fallbacks=[CommandHandler("start", start)]
 )
-
 register_handler = ConversationHandler(
-    entry_points=[
-        CallbackQueryHandler(register_start, pattern="^reg_start_"),
-        CommandHandler("register", cmd_register),
-    ],
+    entry_points=[CallbackQueryHandler(register_start, pattern="^reg_start_"), CommandHandler("register", cmd_register)],
     states={
         WAITING_REGISTER_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_contact)],
         WAITING_REGISTER_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_wallet)],
-        WAITING_REGISTER_TELEGRAM: [
-            CommandHandler("skip", register_receive_telegram),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_telegram),
-        ],
+        WAITING_REGISTER_TELEGRAM: [CommandHandler("skip", register_receive_telegram), MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_telegram)],
     },
     fallbacks=[CommandHandler("start", start)]
 )
-
 login_handler = ConversationHandler(
-    entry_points=[
-        CallbackQueryHandler(login_start, pattern="^login_start$"),
-        CommandHandler("login", cmd_login),
-    ],
+    entry_points=[CallbackQueryHandler(login_start, pattern="^login_start$"), CommandHandler("login", cmd_login)],
     states={WAITING_LOGIN_CREDENTIALS: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_receive_credentials)]},
     fallbacks=[CommandHandler("start", start)]
 )
-
 recover_handler = ConversationHandler(
     entry_points=[CommandHandler("recover", cmd_recover)],
     states={WAITING_RECOVER_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, recover_receive_contact)]},
     fallbacks=[CommandHandler("start", start)]
 )
-
 update_wallet_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(update_wallet_prompt, pattern="^update_wallet$")],
     states={WAITING_UPDATE_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_wallet_receive)]},
     fallbacks=[CommandHandler("start", start)]
 )
-
 update_telegram_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(update_telegram_prompt, pattern="^update_telegram$")],
     states={WAITING_UPDATE_TELEGRAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_telegram_receive)]},
     fallbacks=[CommandHandler("start", start)]
 )
 
-# Command handlers
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("founder", cmd_founder))
 telegram_app.add_handler(CommandHandler("vision", cmd_vision))
@@ -2726,7 +2280,6 @@ telegram_app.add_handler(CommandHandler("resumepayout", cmd_resumepayout))
 telegram_app.add_handler(CommandHandler("kyc", cmd_kyc))
 telegram_app.add_handler(CommandHandler("export", cmd_export))
 
-# Conversation handlers
 telegram_app.add_handler(register_handler)
 telegram_app.add_handler(login_handler)
 telegram_app.add_handler(recover_handler)
@@ -2734,16 +2287,12 @@ telegram_app.add_handler(custom_amount_handler)
 telegram_app.add_handler(update_wallet_handler)
 telegram_app.add_handler(update_telegram_handler)
 
-# Callback handlers
 telegram_app.add_handler(CallbackQueryHandler(register_contact_type, pattern="^reg_contact_(email|phone)$"))
 telegram_app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(show_tiers, pattern="^show_tiers$"))
 telegram_app.add_handler(CallbackQueryHandler(show_calculator, pattern="^show_calculator$"))
 telegram_app.add_handler(CallbackQueryHandler(allocate_menu, pattern="^allocate_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(select_payment_method, pattern="^amount_(1000|5000|25000|100000)$"))
-telegram_app.add_handler(CallbackQueryHandler(generate_invoice, pattern="^pay_"))
-telegram_app.add_handler(CallbackQueryHandler(show_qr_handler, pattern="^show_qr$"))
-telegram_app.add_handler(CallbackQueryHandler(back_to_invoice_handler, pattern="^back_to_invoice$"))
 telegram_app.add_handler(CallbackQueryHandler(logout_handler, pattern="^logout$"))
 telegram_app.add_handler(CallbackQueryHandler(tx_history_handler, pattern="^tx_history$"))
 telegram_app.add_handler(CallbackQueryHandler(deploy_more_handler, pattern="^deploy_more$"))
@@ -2751,100 +2300,134 @@ telegram_app.add_handler(CallbackQueryHandler(account_settings_handler, pattern=
 telegram_app.add_handler(CallbackQueryHandler(back_to_profile_handler, pattern="^back_to_profile$"))
 
 # ============================================================
-# WEBSITE API ENDPOINTS (For Netlify Frontend)
+# WEB API — Manual Admin Approval Flow
 # ============================================================
-import string
 from pydantic import BaseModel
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# Add CORS so Netlify can talk to Railway
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://ai-gr.netlify.app", "http://localhost:3000", "http://localhost:8000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class WebPaymentRequest(BaseModel):
+class CreateOrderRequest(BaseModel):
     amount: float
     tier: str
+    email: str
 
 class WebLoginRequest(BaseModel):
     investor_id: str
     pin: str
 
-class WebAdminLoginRequest(BaseModel):
-    username: str
-    password: str
+class ApproveOrderRequest(BaseModel):
+    order_id: int
 
-@app.post("/api/web/register_payment")
-async def web_register_payment(data: WebPaymentRequest):
-    """Creates a real investor account from the website test checkout."""
-    # Generate unique ID
-    all_investors = await list_investors(10000)
-    count = len(all_investors) + 1
-    investor_id = f"AIG-2026-{count:05d}"
-    
-    # Generate 6-digit PIN
-    pin = "".join(random.choices(string.digits, k=6))
-    
-    # Save to PostgreSQL using your EXISTING database function
-    inv = await create_investor(
-        telegram_user_id=0, # 0 because they are a web user, not a Telegram user
-        contact_type="web",
-        contact_value="web_user",
-        pin=pin,
-        recovery_code="WEB-REG",
-    )
-    
-    # Immediately attach their payment tier
-    if inv:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(Investor).where(Investor.investor_id == inv.investor_id))
-            db_inv = result.scalar_one_or_none()
-            if db_inv:
-                db_inv.total_allocated_usd = data.amount
-                db_inv.tier = data.tier
-                await session.commit()
-        
-        return {"investor_id": inv.investor_id, "pin": pin, "tier": data.tier, "total_allocated": data.amount, "status": "active"}
-    
-    raise HTTPException(status_code=500, detail="Database error")
+# Change these to your actual wallet/bank details!
+PAYMENT_WALLET = "TXyz1234567890abcdefg" 
+BANK_DETAILS = "Bank BCA: 123456789 (Name: AI Grid Indonesia)"
+
+@app.get("/api/web/payment_info")
+async def get_payment_info():
+    return {"wallet": PAYMENT_WALLET, "bank": BANK_DETAILS, "currency": "USDT (TRC-20)"}
+
+@app.post("/api/web/create_order")
+async def create_order(data: CreateOrderRequest):
+    async with AsyncSessionLocal() as session:
+        order = WebOrder(amount_usd=data.amount, tier=data.tier, email=data.email, status="pending")
+        session.add(order)
+        await session.commit()
+        await session.refresh(order)
+        return {"order_id": order.id, "status": order.status}
 
 @app.post("/api/web/login")
 async def web_login(data: WebLoginRequest):
-    """Validates a real web user login."""
     investor = await get_investor_by_id(data.investor_id)
     if not investor or not verify_pin(data.pin, investor.pin_hash):
         raise HTTPException(status_code=401, detail="Invalid Investor ID or PIN")
-    
     if not investor.is_active:
         raise HTTPException(status_code=403, detail="Account suspended")
-
     return {
-        "investor_id": investor.investor_id, 
-        "tier": investor.tier, 
-        "total_allocated": float(investor.total_allocated_usd), 
-        "status": "active"
+        "investor_id": investor.investor_id,
+        "tier": investor.tier,
+        "total_allocated": float(investor.total_allocated_usd or 0),
+        "status": "active",
     }
 
-@app.post("/api/web/admin_login")
-async def web_admin_login(data: WebAdminLoginRequest):
-    """Admin login for the website."""
-    admin_user = os.getenv("ADMIN_USERNAME", "admin")
-    admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
+class UpdatePasswordRequest(BaseModel):
+    investor_id: str
+    old_pin: str
+    new_pin: str
 
-    if data.username != admin_user or data.password != admin_pass:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"status": "success"}
+@app.post("/api/web/update_password")
+async def web_update_password(data: UpdatePasswordRequest):
+    investor = await get_investor_by_id(data.investor_id)
+    if not investor or not verify_pin(data.old_pin, investor.pin_hash):
+        raise HTTPException(status_code=401, detail="Invalid current password")
+    
+    await update_investor_pin(data.investor_id, data.new_pin)
+    return {"status": "success", "message": "Password updated"}
 
-@app.get("/api/web/admin/investors")
-async def web_admin_investors():
-    """Returns list of all investors for the website admin panel."""
-    investors = await list_investors(100)
-    return [{"investor_id": i.investor_id, "tier": i.tier, "total_allocated": float(i.total_allocated_usd or 0), "status": "active" if i.is_active else "suspended"} for i in investors]
+@app.get("/api/web/admin/orders")
+async def admin_orders():
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(WebOrder).order_by(WebOrder.id.desc()))
+        orders = result.scalars().all()
+        return [
+            {
+                "order_id": o.id,
+                "amount_usd": float(o.amount_usd),
+                "tier": o.tier,
+                "email": o.email,
+                "status": o.status,
+                "investor_id": o.investor_id,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+            }
+            for o in orders
+        ]
+
+@app.post("/api/web/admin/approve_order")
+async def approve_order(data: ApproveOrderRequest):
+    # RACE NOTE: two concurrent approvals can both pass the investor_id check.
+    async with AsyncSessionLocal() as session:
+        order = await session.get(WebOrder, data.order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if order.investor_id:
+            raise HTTPException(status_code=400, detail="Order already approved")
+        email = order.email
+        amount = float(order.amount_usd)
+        tier = order.tier
+
+    pin = _gen_pin()
+    recovery = _gen_recovery_code()
+    investor = await create_investor(
+        telegram_user_id=0,
+        contact_type="email",
+        contact_value=email,
+        pin=pin,
+        recovery_code=recovery,
+        wallet_address=None,
+        preferred_telegram_username=None,
+    )
+
+    async with AsyncSessionLocal() as session:
+        order = await session.get(WebOrder, data.order_id)
+        order.investor_id = investor.investor_id
+        order.status = "approved"
+        await session.commit()
+
+    return {
+        "status": "approved",
+        "investor_id": investor.investor_id,
+        "pin": pin,
+        "recovery_code": recovery,
+        "amount_usd": amount,
+        "tier": tier,
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
