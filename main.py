@@ -18,7 +18,9 @@ from datetime import datetime, timedelta
 
 import httpx
 import feedparser
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -36,9 +38,9 @@ from telegram.ext import (
 # ============================================================
 # DATABASE
 # ============================================================
-from sqlalchemy import select, func
+from sqlalchemy import select, func, Column, Integer, String, DateTime
 from database import (
-    AsyncSessionLocal, Investor, WebOrder, hash_pin, verify_pin,
+    AsyncSessionLocal, Investor, WebOrder, hash_pin, verify_pin, Base,
     init_db, create_investor, get_investor_by_id, get_investor_by_telegram,
     get_investor_by_contact, update_investor_login, update_investor_pin,
     record_payment, confirm_payment, attach_payment_to_investor,
@@ -50,6 +52,15 @@ from database import (
     update_kyc_status, create_payout_receipt, list_payouts_for_investor,
     pause_investor_payouts, resume_investor_payouts,
 )
+
+# ============================================================
+# DYNAMIC SETTINGS TABLE
+# ============================================================
+class PlatformSettings(Base):
+    __tablename__ = "platform_settings"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    wallet_address = Column(String(255), nullable=True)
+    bank_details = Column(String(255), nullable=True)
 
 # ============================================================
 # LOGGING
@@ -129,6 +140,8 @@ telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 async def lifespan(app: FastAPI):
     try:
         await init_db()
+        async with AsyncSessionLocal() as session:
+            await session.run_sync(Base.metadata.create_all)
         logger.info("Database initialized.")
     except Exception as e:
         logger.error(f"Database init failed: {e}")
@@ -139,7 +152,6 @@ async def lifespan(app: FastAPI):
     logger.info("Telegram bot polling started.")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    # 6 scheduled posts per day + weekly roundup + admin reminders
     scheduler.add_job(scheduled_morning_brief, "cron", hour=6, minute=0, id="morning_brief")
     scheduler.add_job(scheduled_midday_update, "cron", hour=9, minute=0, id="midday_update")
     scheduler.add_job(scheduled_afternoon_update, "cron", hour=12, minute=0, id="afternoon_update")
@@ -163,6 +175,13 @@ async def lifespan(app: FastAPI):
     logger.info("Bot stopped.")
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============================================================
 # SECURITY HELPERS
@@ -234,22 +253,15 @@ def channel_mark_posted(content_text: str):
     CHANNEL_STATE["daily_count"] += 1
     CHANNEL_STATE["posted_hashes"][_content_hash(content_text)] = now
 
-
 async def safe_channel_send_photo(photo_url: str, caption: str, reply_markup=None):
-    """Try to send with image. If image fails, send as text-only post."""
     can, reason = channel_can_post(caption)
     if not can:
         logger.info(f"Channel post skipped: {reason}")
         return None
-
-    # Try the image first
     try:
         msg = await telegram_app.bot.send_photo(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            photo=photo_url,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=reply_markup
+            chat_id=TELEGRAM_CHANNEL_ID, photo=photo_url, caption=caption,
+            parse_mode="Markdown", reply_markup=reply_markup
         )
         channel_mark_posted(caption)
         return msg
@@ -259,19 +271,14 @@ async def safe_channel_send_photo(photo_url: str, caption: str, reply_markup=Non
             await asyncio.sleep(2)
             try:
                 msg = await telegram_app.bot.send_photo(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    photo=photo_url,
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
+                    chat_id=TELEGRAM_CHANNEL_ID, photo=photo_url, caption=caption,
+                    parse_mode="Markdown", reply_markup=reply_markup
                 )
                 channel_mark_posted(caption)
                 return msg
             except Exception:
                 pass
         logger.warning(f"Photo send failed, falling back to text: {e}")
-
-    # Fallback: send as text-only (no image)
     return await safe_channel_send_text(text=caption, reply_markup=reply_markup)
     
 async def safe_channel_send_text(text: str, reply_markup=None):
@@ -282,11 +289,8 @@ async def safe_channel_send_text(text: str, reply_markup=None):
     for attempt in range(3):
         try:
             msg = await telegram_app.bot.send_message(
-                chat_id=TELEGRAM_CHANNEL_ID,
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
+                chat_id=TELEGRAM_CHANNEL_ID, text=text, parse_mode="Markdown",
+                reply_markup=reply_markup, disable_web_page_preview=True
             )
             channel_mark_posted(text)
             return msg
@@ -435,7 +439,7 @@ async def receive_custom_amount(update: Update, context: ContextTypes.DEFAULT_TY
         return WAITING_CUSTOM_AMOUNT
 
 # ============================================================
-# REGISTRATION FLOW (with wallet + telegram collection)
+# REGISTRATION FLOW
 # ============================================================
 def _gen_pin() -> str:
     return f"{random.SystemRandom().randint(100000, 999999)}"
@@ -496,13 +500,9 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Let a user check their own payment and registration status."""
     user_id = update.effective_user.id
 
-    # Check registration
     investor = await get_investor_by_telegram(user_id)
-
-    # Check pending payments
     pending = await get_pending_payments_for_user(user_id)
 
     lines = ["📋 **Your Account Status**\n"]
@@ -523,7 +523,7 @@ async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pending:
         lines.append(f"\n💳 **Confirmed payments awaiting registration:**")
         for p in pending[:5]:
-            lines.append(f"• ${float(p.amount_usd):,.2f} ({p.pay_currency.upper()}) — {p.order_id}")
+            lines.append(f"• ${float(p.amount_usd):,.2f} ({p.pay_currency.upper()}) — `{p.order_id}`")
         lines.append(f"\nUse `/register` to attach these to your profile.")
     else:
         lines.append(f"\n📭 No confirmed payments waiting.")
@@ -646,7 +646,7 @@ async def register_receive_telegram(update: Update, context: ContextTypes.DEFAUL
         return ConversationHandler.END
 
 # ============================================================
-# LOGIN FLOW (with suspension check)
+# LOGIN FLOW
 # ============================================================
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -1875,35 +1875,18 @@ ENGAGEMENT_POOL = [
     "💎 **Asset-Backed Portfolios:** Do you feel safer allocating capital into physical data center hardware rather than speculative digital tokens?\n\n👍 for YES, physical hardware rules\n👎 for NO, prefer digital assets",
 ]
 
-# ─── RSS FEEDS (25+ Elon ecosystem sources) ───
 RSS_FEEDS = [
-    "https://www.teslarati.com/feed/",
-    "https://electrek.co/guides/tesla/feed/",
-    "https://insideevs.com/rss/articles/all/",
-    "https://cleantechnica.com/tag/tesla/feed/",
-    "https://www.teslaoracle.com/feed/",
-    "https://www.nasaspaceflight.com/feed/",
-    "https://spacenews.com/feed/",
-    "https://www.space.com/feeds/all",
-    "https://arstechnica.com/space/feed/",
-    "https://www.universetoday.com/feed/",
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://venturebeat.com/category/ai/feed/",
-    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    "https://www.wired.com/feed/tag/ai/latest/rss",
-    "https://arstechnica.com/ai/feed/",
-    "https://www.medicalnewstoday.com/rss/neurology.xml",
-    "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml",
-    "https://www.fiercebiotech.com/rss/xml",
-    "https://www.statnews.com/feed/",
-    "https://www.teslarati.com/category/spacex/feed/",
-    "https://www.thestreet.com/rss/news",
-    "https://futurism.com/feed",
-    "https://www.businessinsider.com/rss",
-    "https://www.reuters.com/rssFeed/technologyNews",
-    "https://feeds.bloomberg.com/technology/news.rss",
-    "https://www.axios.com/feeds/feed.rss",
-    "https://www.theinformation.com/feed",
+    "https://www.teslarati.com/feed/", "https://electrek.co/guides/tesla/feed/", "https://insideevs.com/rss/articles/all/",
+    "https://cleantechnica.com/tag/tesla/feed/", "https://www.teslaoracle.com/feed/", "https://www.nasaspaceflight.com/feed/",
+    "https://spacenews.com/feed/", "https://www.space.com/feeds/all", "https://arstechnica.com/space/feed/",
+    "https://www.universetoday.com/feed/", "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://venturebeat.com/category/ai/feed/", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+    "https://www.wired.com/feed/tag/ai/latest/rss", "https://arstechnica.com/ai/feed/",
+    "https://www.medicalnewstoday.com/rss/neurology.xml", "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml",
+    "https://www.fiercebiotech.com/rss/xml", "https://www.statnews.com/feed/", "https://www.teslarati.com/category/spacex/feed/",
+    "https://www.thestreet.com/rss/news", "https://futurism.com/feed", "https://www.businessinsider.com/rss",
+    "https://www.reuters.com/rssFeed/technologyNews", "https://feeds.bloomberg.com/technology/news.rss",
+    "https://www.axios.com/feeds/feed.rss", "https://www.theinformation.com/feed",
 ]
 
 _used_news_indices = []
@@ -2042,12 +2025,7 @@ def detect_hashtag(title: str, summary: str) -> str:
     if "boring" in text: return "#BoringCompany"
     return "#xUniverse"
 
-MUSK_KEYWORDS = [
-    "tesla", "spacex", "starlink", "starship", "falcon", "dragon capsule",
-    "grok", "xai", "neuralink", "elon", "musk", "optimus", "cybertruck",
-    "boring company", "model 3", "model y", "model s", "model x", "fsd",
-    "autopilot", "supercharger", "robotaxi", "dojo",
-]
+MUSK_KEYWORDS = ["tesla", "spacex", "starlink", "starship", "falcon", "dragon capsule", "grok", "xai", "neuralink", "elon", "musk", "optimus", "cybertruck", "boring company", "model 3", "model y", "model s", "model x", "fsd", "autopilot", "supercharger", "robotaxi", "dojo"]
 
 def _is_musk_related(title: str, summary: str) -> bool:
     text = (title + " " + summary).lower()
@@ -2096,6 +2074,7 @@ def get_channel_content_for_hour(hour_utc: int):
     elif hour_utc == 18: choice = random.choice(["testimony", "engagement", "rss", "dataset"])
     elif hour_utc == 22: choice = random.choice(["ad", "testimony", "testimony", "briefing"])
     else: choice = random.choice(["dataset", "briefing", "rss", "testimony", "ad", "engagement"])
+
     if choice == "briefing": return get_frontier_briefing()
     if choice == "dataset": return get_dataset_news_item()
     if choice == "rss":
@@ -2184,7 +2163,8 @@ async def scheduled_payout_reminder():
         investors = await get_active_investors_with_payouts()
         total = sum(float(i.total_allocated_usd or 0) * 0.20 for i in investors)
         text = (
-            f"💰 **Payout Cycle Reminder**\n───────────────────────────────\n"
+            f"💰 **Payout Cycle Reminder**\n"
+            f"───────────────────────────────\n"
             f"• Active investors with wallets: {len(investors)}\n"
             f"• Total pending this cycle: ${total:,.2f}\n\n"
             f"Run `/payoutlist` to see the full breakdown.\n"
@@ -2207,10 +2187,16 @@ async def scheduled_monthly_statements():
                 await telegram_app.bot.send_message(
                     chat_id=inv.telegram_user_id,
                     text=(
-                        f"📊 **Monthly Statement — {datetime.utcnow().strftime('%B %Y')}**\n───────────────────────────────\n"
-                        f"• **Investor ID:** `{inv.investor_id}`\n• **Tier:** {inv.tier}\n• **Total Allocated:** ${total:,.2f}\n"
-                        f"• **30-Day Payout:** ${monthly:,.2f}\n{wallet_line}\n\nThank you for being part of AI Grid Indonesia."
-                    ), parse_mode="Markdown"
+                        f"📊 **Monthly Statement — {datetime.utcnow().strftime('%B %Y')}**\n"
+                        f"───────────────────────────────\n"
+                        f"• **Investor ID:** `{inv.investor_id}`\n"
+                        f"• **Tier:** {inv.tier}\n"
+                        f"• **Total Allocated:** ${total:,.2f}\n"
+                        f"• **30-Day Payout:** ${monthly:,.2f}\n"
+                        f"{wallet_line}\n\n"
+                        f"Thank you for being part of AI Grid Indonesia."
+                    ),
+                    parse_mode="Markdown"
                 )
             except Exception as e: logger.warning(f"Could not send statement to {inv.investor_id}: {e}")
     except Exception as e: logger.error(f"Monthly statements failed: {e}")
@@ -2223,36 +2209,51 @@ custom_amount_handler = ConversationHandler(
     states={WAITING_CUSTOM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_amount)]},
     fallbacks=[CommandHandler("start", start)]
 )
+
 register_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(register_start, pattern="^reg_start_"), CommandHandler("register", cmd_register)],
+    entry_points=[
+        CallbackQueryHandler(register_start, pattern="^reg_start_"),
+        CommandHandler("register", cmd_register),
+    ],
     states={
         WAITING_REGISTER_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_contact)],
         WAITING_REGISTER_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_wallet)],
-        WAITING_REGISTER_TELEGRAM: [CommandHandler("skip", register_receive_telegram), MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_telegram)],
+        WAITING_REGISTER_TELEGRAM: [
+            CommandHandler("skip", register_receive_telegram),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, register_receive_telegram),
+        ],
     },
     fallbacks=[CommandHandler("start", start)]
 )
+
 login_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(login_start, pattern="^login_start$"), CommandHandler("login", cmd_login)],
+    entry_points=[
+        CallbackQueryHandler(login_start, pattern="^login_start$"),
+        CommandHandler("login", cmd_login),
+    ],
     states={WAITING_LOGIN_CREDENTIALS: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_receive_credentials)]},
     fallbacks=[CommandHandler("start", start)]
 )
+
 recover_handler = ConversationHandler(
     entry_points=[CommandHandler("recover", cmd_recover)],
     states={WAITING_RECOVER_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, recover_receive_contact)]},
     fallbacks=[CommandHandler("start", start)]
 )
+
 update_wallet_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(update_wallet_prompt, pattern="^update_wallet$")],
     states={WAITING_UPDATE_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_wallet_receive)]},
     fallbacks=[CommandHandler("start", start)]
 )
+
 update_telegram_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(update_telegram_prompt, pattern="^update_telegram$")],
     states={WAITING_UPDATE_TELEGRAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_telegram_receive)]},
     fallbacks=[CommandHandler("start", start)]
 )
 
+# Command handlers
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("founder", cmd_founder))
 telegram_app.add_handler(CommandHandler("vision", cmd_vision))
@@ -2280,6 +2281,7 @@ telegram_app.add_handler(CommandHandler("resumepayout", cmd_resumepayout))
 telegram_app.add_handler(CommandHandler("kyc", cmd_kyc))
 telegram_app.add_handler(CommandHandler("export", cmd_export))
 
+# Conversation handlers
 telegram_app.add_handler(register_handler)
 telegram_app.add_handler(login_handler)
 telegram_app.add_handler(recover_handler)
@@ -2287,6 +2289,7 @@ telegram_app.add_handler(custom_amount_handler)
 telegram_app.add_handler(update_wallet_handler)
 telegram_app.add_handler(update_telegram_handler)
 
+# Callback handlers
 telegram_app.add_handler(CallbackQueryHandler(register_contact_type, pattern="^reg_contact_(email|phone)$"))
 telegram_app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
 telegram_app.add_handler(CallbackQueryHandler(show_tiers, pattern="^show_tiers$"))
@@ -2298,136 +2301,6 @@ telegram_app.add_handler(CallbackQueryHandler(tx_history_handler, pattern="^tx_h
 telegram_app.add_handler(CallbackQueryHandler(deploy_more_handler, pattern="^deploy_more$"))
 telegram_app.add_handler(CallbackQueryHandler(account_settings_handler, pattern="^account_settings$"))
 telegram_app.add_handler(CallbackQueryHandler(back_to_profile_handler, pattern="^back_to_profile$"))
-
-# ============================================================
-# WEB API — Manual Admin Approval Flow
-# ============================================================
-from pydantic import BaseModel
-from fastapi import HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class CreateOrderRequest(BaseModel):
-    amount: float
-    tier: str
-    email: str
-
-class WebLoginRequest(BaseModel):
-    investor_id: str
-    pin: str
-
-class ApproveOrderRequest(BaseModel):
-    order_id: int
-
-# Change these to your actual wallet/bank details!
-PAYMENT_WALLET = "TXyz1234567890abcdefg" 
-BANK_DETAILS = "Bank BCA: 123456789 (Name: AI Grid Indonesia)"
-
-@app.get("/api/web/payment_info")
-async def get_payment_info():
-    return {"wallet": PAYMENT_WALLET, "bank": BANK_DETAILS, "currency": "USDT (TRC-20)"}
-
-@app.post("/api/web/create_order")
-async def create_order(data: CreateOrderRequest):
-    async with AsyncSessionLocal() as session:
-        order = WebOrder(amount_usd=data.amount, tier=data.tier, email=data.email, status="pending")
-        session.add(order)
-        await session.commit()
-        await session.refresh(order)
-        return {"order_id": order.id, "status": order.status}
-
-@app.post("/api/web/login")
-async def web_login(data: WebLoginRequest):
-    investor = await get_investor_by_id(data.investor_id)
-    if not investor or not verify_pin(data.pin, investor.pin_hash):
-        raise HTTPException(status_code=401, detail="Invalid Investor ID or PIN")
-    if not investor.is_active:
-        raise HTTPException(status_code=403, detail="Account suspended")
-    return {
-        "investor_id": investor.investor_id,
-        "tier": investor.tier,
-        "total_allocated": float(investor.total_allocated_usd or 0),
-        "status": "active",
-    }
-
-class UpdatePasswordRequest(BaseModel):
-    investor_id: str
-    old_pin: str
-    new_pin: str
-
-@app.post("/api/web/update_password")
-async def web_update_password(data: UpdatePasswordRequest):
-    investor = await get_investor_by_id(data.investor_id)
-    if not investor or not verify_pin(data.old_pin, investor.pin_hash):
-        raise HTTPException(status_code=401, detail="Invalid current password")
-    
-    await update_investor_pin(data.investor_id, data.new_pin)
-    return {"status": "success", "message": "Password updated"}
-
-@app.get("/api/web/admin/orders")
-async def admin_orders():
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(WebOrder).order_by(WebOrder.id.desc()))
-        orders = result.scalars().all()
-        return [
-            {
-                "order_id": o.id,
-                "amount_usd": float(o.amount_usd),
-                "tier": o.tier,
-                "email": o.email,
-                "status": o.status,
-                "investor_id": o.investor_id,
-                "created_at": o.created_at.isoformat() if o.created_at else None,
-            }
-            for o in orders
-        ]
-
-@app.post("/api/web/admin/approve_order")
-async def approve_order(data: ApproveOrderRequest):
-    # RACE NOTE: two concurrent approvals can both pass the investor_id check.
-    async with AsyncSessionLocal() as session:
-        order = await session.get(WebOrder, data.order_id)
-        if order is None:
-            raise HTTPException(status_code=404, detail="Order not found")
-        if order.investor_id:
-            raise HTTPException(status_code=400, detail="Order already approved")
-        email = order.email
-        amount = float(order.amount_usd)
-        tier = order.tier
-
-    pin = _gen_pin()
-    recovery = _gen_recovery_code()
-    investor = await create_investor(
-        telegram_user_id=0,
-        contact_type="email",
-        contact_value=email,
-        pin=pin,
-        recovery_code=recovery,
-        wallet_address=None,
-        preferred_telegram_username=None,
-    )
-
-    async with AsyncSessionLocal() as session:
-        order = await session.get(WebOrder, data.order_id)
-        order.investor_id = investor.investor_id
-        order.status = "approved"
-        await session.commit()
-
-    return {
-        "status": "approved",
-        "investor_id": investor.investor_id,
-        "pin": pin,
-        "recovery_code": recovery,
-        "amount_usd": amount,
-        "tier": tier,
-    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
